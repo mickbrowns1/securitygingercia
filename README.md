@@ -32,19 +32,52 @@ Collector but purpose-built and self-contained:
 
 ### Build from source
 
-Requires a Rust toolchain (1.75+; install via [rustup](https://rustup.rs)
-if you don't have one):
+#### 1. Prerequisites
+
+You need a C linker/compiler installed **before** building -- Rust needs
+one to link the final binary (and even build scripts, which run as their
+own compiled executable), regardless of whether the project itself has
+any C code. A fresh Ubuntu/Debian box, in particular, has none installed
+by default and will fail with ``error: linker `cc` not found`` on the
+very first `cargo build` otherwise.
+
+```bash
+# Debian / Ubuntu
+sudo apt update && sudo apt install -y build-essential git
+
+# Fedora / RHEL / CentOS
+sudo dnf groupinstall -y "Development Tools"
+
+# Arch
+sudo pacman -S --needed base-devel git
+
+# macOS (if `cc` isn't already present -- check with `xcode-select -p` first)
+xcode-select --install
+```
+
+Then install a Rust toolchain, if you don't have one (this works the
+same way on every platform above):
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
 ```
 
-Then, from the repository root:
+#### 2. Get the code
+
+```bash
+git clone https://github.com/mickbrowns1/securitygingercia.git
+cd securitygingercia
+```
+
+#### 3. Build
 
 ```bash
 cargo build --release
 ```
+
+If this is the first thing you're compiling on the machine and it fails
+with a linker error, go back to step 1 -- that's what it means.
 
 The binary lands at `target/release/sgcia` (macOS/Linux) or
 `target\release\sgcia.exe` (Windows). It's been built and its automated
