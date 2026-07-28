@@ -104,15 +104,91 @@ cargo build --release --target x86_64-unknown-linux-musl --bin sgcia
 
 ### Installing the binary (Linux/macOS)
 
-```bash
-sudo install -m 755 target/release/sgcia /usr/local/bin/sgcia
-sudo mkdir -p /etc/sgcia /var/lib/sgcia
-```
+Right after `cargo build --release` finishes, the program exists as a
+file, but your computer doesn't yet know it's a command you can type by
+name (`sgcia`) -- it only knows how to find it if you tell it the exact
+location (`./target/release/sgcia`). Installing it just means: copy that
+file into one of the folders your computer already checks automatically
+whenever you type a command name.
 
-`/var/lib/sgcia` is a reasonable default place for file-tail checkpoints
-and Windows Event Log bookmarks (see `checkpoint_file`/`bookmark_file` in
-your config) -- sgcia creates the file itself, but the parent directory
-should exist and be writable by whatever user runs it.
+Follow these steps in order, from inside the `securitygingercia` folder
+(the one you got from `git clone` earlier):
+
+1. **Check the file actually exists first.** This makes sure the build
+   really finished before you go any further:
+
+   ```bash
+   ls -lh target/release/sgcia
+   ```
+
+   You should see one line of output describing a file a few megabytes
+   in size. If instead you see something like `No such file or
+   directory`, the build didn't finish -- go back to the
+   [Build](#3-build) step above and fix whatever error `cargo build
+   --release` printed before continuing.
+
+2. **Copy it into `/usr/local/bin`**, a standard folder that's already
+   set up to hold commands you can run by name:
+
+   ```bash
+   sudo install -m 755 target/release/sgcia /usr/local/bin/sgcia
+   ```
+
+   - `sudo` means "do this as an administrator" -- it's needed because
+     `/usr/local/bin` is a system folder. It will ask for **your own
+     login password** (not a special admin password). Type it and press
+     Enter -- nothing will appear on screen while you type, not even
+     dots, that's normal, just type it correctly and hit Enter.
+   - `install -m 755 <source> <destination>` copies the file from
+     `target/release/sgcia` to `/usr/local/bin/sgcia` and marks it as
+     "OK to run as a program" at the same time (a plain `cp` copy
+     wouldn't necessarily do that part).
+
+3. **Check that it worked.** Close nothing, just run:
+
+   ```bash
+   sgcia --version
+   ```
+
+   If you see something like `sgcia 0.1.0`, it worked -- you can now
+   type `sgcia ...` from any folder, any time, and it'll be found. If
+   you instead still see `command not found`, see
+   [Troubleshooting: still says "command not found"](#troubleshooting-still-says-command-not-found)
+   below.
+
+4. **Create the two folders sgcia expects to use** for its config file
+   and its working data (checkpoints, bookmarks):
+
+   ```bash
+   sudo mkdir -p /etc/sgcia /var/lib/sgcia
+   ```
+
+   `/etc/sgcia` is where its config file (`config.yaml`) will live.
+   `/var/lib/sgcia` is a reasonable default place for file-tail
+   checkpoints and Windows Event Log bookmarks (see
+   `checkpoint_file`/`bookmark_file` in your config) -- sgcia creates
+   those files itself as it runs, but the folder needs to already exist.
+
+You only need to do all four of these steps **once** per machine. After
+that, `sgcia edit --config /etc/sgcia/config.yaml` (or any other `sgcia
+...` command) will just work, from any directory, in any new terminal
+window, forever -- no need to repeat these steps or remember where
+`target/release/sgcia` is.
+
+#### Troubleshooting: still says "command not found"
+
+- Double check step 2 actually completed without an error message. Run
+  `ls -lh /usr/local/bin/sgcia` -- if that also says "No such file or
+  directory", the copy didn't happen; re-run the `sudo install ...`
+  command from step 2 and read its output carefully for errors.
+- Some terminals cache the list of known commands for as long as they're
+  open. If step 3 still fails right after a successful install, open a
+  **brand new terminal window** (or run `hash -r`) and try `sgcia
+  --version` again.
+- As a fallback that always works no matter what: you can skip
+  installing entirely and just always type the full path instead,
+  e.g. `./target/release/sgcia edit --config /etc/sgcia/config.yaml`,
+  run from inside the `securitygingercia` folder.
 
 ## Configuring
 
