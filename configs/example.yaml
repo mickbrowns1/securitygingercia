@@ -1,9 +1,10 @@
 # Example config for Security Ginger Collect It All (sgcia).
 #
 # Validate with `sgcia check --config example.yaml`, or edit interactively
-# with `sgcia edit --config example.yaml`. Secrets referenced as ${VAR}
-# below (S1_HEC_TOKEN, SPLUNK_HEC_TOKEN) are read from the environment at
-# load time -- see README.md for how to supply them.
+# with `sgcia edit --config example.yaml`. Secrets referenced below via
+# the dollar-brace-VAR_NAME syntax (S1_HEC_TOKEN, SPLUNK_HEC_TOKEN) are
+# read from the environment at load time -- see README.md for how to
+# supply them.
 
 receivers:
   syslog/udp:
