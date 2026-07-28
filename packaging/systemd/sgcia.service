@@ -1,0 +1,30 @@
+[Unit]
+Description=Security Ginger Collect It All (sgcia) - log collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sgcia
+Group=sgcia
+EnvironmentFile=-/etc/sgcia/sgcia.env
+ExecStart=/usr/local/bin/sgcia run --config /etc/sgcia/config.yaml --status-addr 127.0.0.1:7801
+Restart=on-failure
+RestartSec=5s
+WorkingDirectory=/var/lib/sgcia
+
+# Only needed if a receiver's listen_address is a privileged port (< 1024,
+# e.g. standard syslog UDP/TCP 514/601). Remove both lines below if every
+# listen_address in your config uses an unprivileged port instead.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+# Light sandboxing. Adjust ReadWritePaths if your config's
+# checkpoint_file/bookmark_file paths point somewhere other than
+# /var/lib/sgcia.
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/sgcia
+
+[Install]
+WantedBy=multi-user.target

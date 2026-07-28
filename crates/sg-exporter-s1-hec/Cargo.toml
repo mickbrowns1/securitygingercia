@@ -1,0 +1,19 @@
+[package]
+name = "sg-exporter-s1-hec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sg-core = { workspace = true }
+sg-config = { workspace = true }
+sg-exporter-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+wiremock = "0.6"

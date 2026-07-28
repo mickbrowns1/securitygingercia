@@ -1,0 +1,48 @@
+[package]
+name = "collector"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sgcia"
+path = "src/main.rs"
+
+[dependencies]
+sg-core = { workspace = true }
+sg-config = { workspace = true }
+sg-operators = { workspace = true }
+sg-receiver-syslog = { workspace = true }
+sg-receiver-file = { workspace = true }
+sg-exporter-core = { workspace = true }
+sg-exporter-s1-hec = { workspace = true }
+sg-exporter-splunk-hec = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+axum = { workspace = true }
+reqwest = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+tui-input = { workspace = true }
+futures-util = "0.3"
+serde_yaml_ng = { workspace = true }
+# Unconditional (not target-gated): WinEventLogConfig/from_value is plain
+# cross-platform config parsing, needed so `sgcia edit`/`sgcia check` can
+# validate a windows_eventlog receiver's config from any host. Only the
+# actual EvtSubscribe wiring inside this crate (sg_receiver_winevtlog::
+# windows_impl, re-exported as WinEventLogReceiver) is cfg(windows)-gated,
+# and build.rs already only references that behind its own cfg(windows).
+sg-receiver-winevtlog = { path = "../sg-receiver-winevtlog" }
+
+[dev-dependencies]
+bytes = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+chrono = { workspace = true }
+tempfile = "3"
