@@ -111,11 +111,25 @@ location (`./target/release/sgcia`). Installing it just means: copy that
 file into one of the folders your computer already checks automatically
 whenever you type a command name.
 
-Follow these steps in order, from inside the `securitygingercia` folder
-(the one you got from `git clone` earlier):
+Follow these steps in order.
 
-1. **Check the file actually exists first.** This makes sure the build
-   really finished before you go any further:
+1. **Make sure you're in the right folder first** -- the main
+   `securitygingercia` folder you got from `git clone`, not a subfolder
+   like `configs` inside it (an easy mistake if you were just looking at
+   the example config). Run:
+
+   ```bash
+   ls
+   ```
+
+   You should see `Cargo.toml`, `README.md`, `configs`, `crates`, and
+   `target` all listed together. If you don't see all of those (for
+   example, you only see `example.yaml` and `smoke-test.yaml`), you're
+   one folder too deep -- run `cd ..` and check with `ls` again until
+   you do see all of them.
+
+2. **Check the file actually exists.** This makes sure the build really
+   finished before you go any further:
 
    ```bash
    ls -lh target/release/sgcia
@@ -123,11 +137,12 @@ Follow these steps in order, from inside the `securitygingercia` folder
 
    You should see one line of output describing a file a few megabytes
    in size. If instead you see something like `No such file or
-   directory`, the build didn't finish -- go back to the
-   [Build](#3-build) step above and fix whatever error `cargo build
-   --release` printed before continuing.
+   directory`, either you're still in the wrong folder (go back to step
+   1), or the build didn't finish -- go back to the [Build](#3-build)
+   step above and fix whatever error `cargo build --release` printed
+   before continuing.
 
-2. **Copy it into `/usr/local/bin`**, a standard folder that's already
+3. **Copy it into `/usr/local/bin`**, a standard folder that's already
    set up to hold commands you can run by name:
 
    ```bash
@@ -144,7 +159,7 @@ Follow these steps in order, from inside the `securitygingercia` folder
      "OK to run as a program" at the same time (a plain `cp` copy
      wouldn't necessarily do that part).
 
-3. **Check that it worked.** Close nothing, just run:
+4. **Check that it worked.** Close nothing, just run:
 
    ```bash
    sgcia --version
@@ -156,7 +171,7 @@ Follow these steps in order, from inside the `securitygingercia` folder
    [Troubleshooting: still says "command not found"](#troubleshooting-still-says-command-not-found)
    below.
 
-4. **Create the two folders sgcia expects to use** for its config file
+5. **Create the two folders sgcia expects to use** for its config file
    and its working data (checkpoints, bookmarks):
 
    ```bash
@@ -169,7 +184,7 @@ Follow these steps in order, from inside the `securitygingercia` folder
    `checkpoint_file`/`bookmark_file` in your config) -- sgcia creates
    those files itself as it runs, but the folder needs to already exist.
 
-You only need to do all four of these steps **once** per machine. After
+You only need to do all five of these steps **once** per machine. After
 that, `sgcia edit --config /etc/sgcia/config.yaml` (or any other `sgcia
 ...` command) will just work, from any directory, in any new terminal
 window, forever -- no need to repeat these steps or remember where
@@ -177,12 +192,17 @@ window, forever -- no need to repeat these steps or remember where
 
 #### Troubleshooting: still says "command not found"
 
-- Double check step 2 actually completed without an error message. Run
+- If step 3's `sudo install ...` printed something like `cannot install
+  target/release/sgcia to /usr/local/bin/sgcia`, you were almost
+  certainly in the wrong folder when you ran it (see step 1) -- `cd ..`
+  back to the main `securitygingercia` folder and confirm with `ls`
+  before retrying steps 2 and 3.
+- Double check step 3 actually completed without an error message. Run
   `ls -lh /usr/local/bin/sgcia` -- if that also says "No such file or
   directory", the copy didn't happen; re-run the `sudo install ...`
-  command from step 2 and read its output carefully for errors.
+  command from step 3 and read its output carefully for errors.
 - Some terminals cache the list of known commands for as long as they're
-  open. If step 3 still fails right after a successful install, open a
+  open. If step 4 still fails right after a successful install, open a
   **brand new terminal window** (or run `hash -r`) and try `sgcia
   --version` again.
 - As a fallback that always works no matter what: you can skip
