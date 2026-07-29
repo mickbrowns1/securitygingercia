@@ -7,9 +7,27 @@ use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
 const PIPELINE_FIELDS: &[FieldSpec] = &[
-    FieldSpec { key: "receivers", kind: FieldKind::StringList, required: false, default: None },
-    FieldSpec { key: "operators", kind: FieldKind::StringList, required: false, default: None },
-    FieldSpec { key: "exporters", kind: FieldKind::StringList, required: false, default: None },
+    FieldSpec {
+        key: "receivers",
+        kind: FieldKind::StringList,
+        required: false,
+        default: None,
+        help: "Which receivers feed this pipeline, by id -- e.g. syslog/udp, filelog/app. Comma-separate multiple.",
+    },
+    FieldSpec {
+        key: "operators",
+        kind: FieldKind::StringList,
+        required: false,
+        default: None,
+        help: "Which operators to run, in order, by id -- e.g. extract_asa_fields, add_datasource. Comma-separate multiple; leave blank to skip parsing entirely.",
+    },
+    FieldSpec {
+        key: "exporters",
+        kind: FieldKind::StringList,
+        required: false,
+        default: None,
+        help: "Where processed events get sent, by exporter id -- e.g. sentinelone_hec. Comma-separate multiple to fan out to more than one.",
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,20 +402,15 @@ impl App {
                 };
                 match tab.category() {
                     Some(category) => {
+                        let value = self.map_for(category)[&id].clone();
+                        let type_name = component_type_name(category, &id, &value);
                         let spec = schema_registry::types_for(category)
                             .iter()
-                            .find(|s| {
-                                s.type_name
-                                    == self.map_for(category)[&id]
-                                        .get("type")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or(s.type_name)
-                            })
+                            .find(|s| s.type_name == type_name)
                             .or_else(|| schema_registry::types_for(category).first());
                         let Some(spec) = spec else {
                             return Screen::TopLevel { tab, selected };
                         };
-                        let value = self.map_for(category)[&id].clone();
                         let form = FormState::new(Some(spec.type_name), spec.fields, &value);
                         Screen::EditComponent { category, id, form }
                     }
@@ -477,6 +490,24 @@ fn tab_for(category: ComponentCategory) -> TopTab {
         ComponentCategory::Receiver => TopTab::Receivers,
         ComponentCategory::Operator => TopTab::Operators,
         ComponentCategory::Exporter => TopTab::Exporters,
+    }
+}
+
+/// Determines a component's registry type name the same way `build.rs`
+/// actually dispatches it at runtime: receivers are typed by their id's
+/// `type/name` prefix (they have no `type:` field of their own),
+/// exporters and operators by an explicit `type:` key in their value
+/// (falling back to the id prefix only because `build_exporter` does).
+/// Getting this wrong means editing an existing component silently
+/// resolves to the wrong type's form.
+fn component_type_name(category: ComponentCategory, id: &str, value: &Value) -> String {
+    match category {
+        ComponentCategory::Receiver => sg_config::component_type(id).to_string(),
+        ComponentCategory::Exporter | ComponentCategory::Operator => value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| sg_config::component_type(id))
+            .to_string(),
     }
 }
 
