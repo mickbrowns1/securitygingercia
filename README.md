@@ -315,6 +315,13 @@ Works entirely offline against the YAML file -- it never talks to a
 running `sgcia run` process. Changes only take effect once you restart
 the collector.
 
+Every screen shows help as you go: picking a type shows a one-line
+description of what it does, and editing a component shows a plain-
+English explanation (with an example value) for whichever field is
+currently highlighted, at the bottom of the screen. You don't need to
+already know what `poll_interval` or `checkpoint_file` means -- read the
+line at the bottom before typing.
+
 | Key | Action |
 |---|---|
 | `Tab` / `Shift+Tab` | Switch between Receivers / Operators / Exporters / Pipelines tabs |
@@ -329,6 +336,54 @@ While editing a component's fields: `Tab`/`Shift+Tab` moves between
 fields, `Left`/`Right` cycles enum-type fields (protocol, start_at,
 etc.), any other key types into the focused text field, `Enter` saves
 the form (back to the list), `Esc` discards changes to that component.
+Newly-added fields often start pre-filled with a placeholder value (so
+the form is never blank) -- press `Ctrl+U` to clear a field's current
+text before typing your real value, rather than typing in front of or
+after the placeholder by mistake.
+
+#### Walkthrough: build a minimal working config from scratch
+
+This builds a pipeline that tails a log file and just prints what it
+finds to your screen (no real destination yet) -- the fastest way to see
+the whole tool work end to end before wiring up a real HEC endpoint.
+
+1. Run `sgcia edit --config test.yaml` (a new file -- it doesn't need to
+   exist yet).
+2. You're on the **Receivers** tab, and it's empty. Press `a` to add one.
+3. A list of receiver types appears, with a description of the
+   highlighted one at the bottom. Use `Up`/`Down` to look them over, then
+   press `Enter` on **filelog** (tails a file from disk).
+4. It asks for an id -- type `filelog/test` and press `Enter`.
+5. You're now editing its fields. Press `Tab` to move between them and
+   read the help line at the bottom for each one. Two fields start
+   pre-filled with the word `placeholder` -- press `Ctrl+U` to clear
+   each one before typing over it:
+   - `include`: clear it, then type a real file on your machine, e.g.
+     `/var/log/syslog` (Linux) or `/var/log/system.log` (macOS)
+   - `checkpoint_file`: clear it, then type a path sgcia can create and
+     write to, e.g. `/tmp/test.checkpoint.json`
+   - leave everything else at its default
+   Press `Enter` to save this component (back to the Receivers list).
+6. Press `Tab` twice to reach the **Exporters** tab (tabs go Receivers →
+   Operators → Exporters → Pipelines), then `a` to add one. Pick
+   **stdout** (prints events to the screen, no setup needed) and name it
+   `debug`. Press `Enter` on its (empty) field list to confirm it.
+7. Press `Tab` once more to reach the **Pipelines** tab, then `a` to add
+   one. Name it `test`.
+8. On its field list: set `receivers` to `filelog/test` and `exporters`
+   to `debug` (leave `operators` blank -- that's fine, it just means no
+   parsing happens, the raw log lines get sent as-is). Press `Enter` to
+   save.
+9. Press `s` to validate and save the whole file. The status line at the
+   bottom will say `saved test.yaml` if everything's valid, or explain
+   what's wrong if not.
+10. Press `q` to quit, then try it: `sgcia run --config test.yaml` --
+    you should see JSON lines print to your terminal as new lines get
+    written to the file you picked in step 5.
+
+From there, add `operators` (see [`configs/example.yaml`](configs/example.yaml)
+for real examples of `regex`/`kv`/`timestamp` parsing) and swap the
+`stdout` exporter for a real `s1hec`/`splunkhec` one once you're ready.
 
 ## Running as a systemd service (Linux)
 
