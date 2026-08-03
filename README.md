@@ -1,23 +1,39 @@
 # Security Ginger Collect It All (sgcia)
 
-A single static-ish binary log collector, in the spirit of the OpenTelemetry
-Collector but purpose-built and self-contained:
+A syslog/flat-file/Windows-Event-Log collector built **on top of the
+[OpenTelemetry Collector](https://github.com/open-telemetry/opentelemetry-collector-contrib)**,
+plus a small companion terminal UI for editing its config and watching it
+run. Two binaries:
 
-- **Receivers**: syslog (UDP + TCP, RFC 3164 and RFC 5424, RFC 6587
-  octet-counting and non-transparent TCP framing), flat-file tailing
-  (glob discovery, rotation-aware, checkpointed), Windows Event Log
-  (`EvtSubscribe`-based, Windows-only at runtime).
-- **Parsing pipeline**: a configurable chain of operators (regex, JSON,
-  key=value, severity mapping, timestamp parsing, field add/remove/copy/
-  move/rename) applied to every event before export.
-- **Exporters**: SentinelOne DataPipeline HEC and generic Splunk HEC, both
-  with batching, retry/backoff, and newline-delimited framing.
-- **Live dashboard** (`sgcia dashboard`): a terminal UI that polls a
-  running collector's local status API and shows per-receiver/pipeline/
-  exporter throughput, parse errors, and export retries/failures.
-- **Config editor** (`sgcia edit`): a terminal UI for browsing, adding,
-  editing, and removing receivers/operators/exporters/pipelines in a YAML
-  config file, with validation before every save.
+- **`sgcia-otelcol`** -- the actual collector engine. A custom OpenTelemetry
+  Collector distribution assembled by the official
+  [OCB (OpenTelemetry Collector Builder)](https://github.com/open-telemetry/opentelemetry-collector/tree/main/cmd/builder)
+  tool from upstream `opentelemetry-collector-contrib` components (pinned
+  by version in [`otelcol/builder-config.yaml`](otelcol/builder-config.yaml))
+  plus one small local extension we wrote ourselves
+  ([`otelcol/extensions/statuscfgextension`](otelcol/extensions/statuscfgextension)).
+  Bumping a security patch later is editing version strings in one YAML
+  file and rebuilding -- there's no forked/vendored copy of contrib to
+  maintain. Ships with:
+  - **Receivers**: `syslog` (UDP and/or TCP, RFC 3164/5424, RFC 6587
+    octet-counting framing), `file_log` (glob-based file tailing, like
+    `tail -f`), `windows_event_log` (Windows only at runtime).
+  - **Inline parsing**: each receiver owns its own `operators:` list (the
+    `pkg/stanza` vocabulary: regex/JSON/key-value parsing, severity and
+    timestamp parsing, field add/remove/copy/move) applied to every event
+    before export.
+  - **Exporters**: `splunk_hec` (works against both SentinelOne
+    DataPipeline and generic Splunk HEC endpoints) and `debug` (prints
+    events to the terminal, for testing a pipeline before wiring up a
+    real destination).
+- **`sgcia`** -- the Rust companion. Two subcommands:
+  - **`sgcia dashboard`**: a terminal UI that polls a running
+    `sgcia-otelcol` process's `/status` endpoint and shows
+    per-receiver/pipeline/exporter throughput and errors.
+  - **`sgcia edit`**: a terminal UI for browsing, adding, editing, and
+    removing receivers/exporters/extensions/pipelines (and each
+    receiver's inline operators) in a YAML config file, validated against
+    the real `sgcia-otelcol validate` on every save.
 
 ## Contents
 
@@ -25,21 +41,54 @@ Collector but purpose-built and self-contained:
 - [Configuring](#configuring)
 - [Using sgcia](#using-sgcia)
 - [Running as a systemd service (Linux)](#running-as-a-systemd-service-linux)
-- [The status API](#the-status-api)
+- [The status endpoint](#the-status-endpoint)
 - [Development](#development)
 
 ## Installing
 
-### Build from source
+You're building two independent binaries here: `sgcia-otelcol` (Go) and
+`sgcia` (Rust). Neither depends on the other at build time.
 
-#### 1. Prerequisites
+### 1. Get the code
 
-You need a C linker/compiler installed **before** building -- Rust needs
-one to link the final binary (and even build scripts, which run as their
-own compiled executable), regardless of whether the project itself has
-any C code. A fresh Ubuntu/Debian box, in particular, has none installed
-by default and will fail with ``error: linker `cc` not found`` on the
-very first `cargo build` otherwise.
+```bash
+git clone https://github.com/mickbrowns1/securitygingercia.git
+cd securitygingercia
+```
+
+### 2. Build `sgcia-otelcol` (the collector engine)
+
+**Prerequisite: Go.** Install from
+[go.dev/doc/install](https://go.dev/doc/install) if you don't have it
+(`go version` to check). The OCB tool itself will pull a newer Go
+toolchain automatically via Go's own toolchain-management mechanism if
+your installed version is older than it needs -- you don't need to
+pre-empt that.
+
+Install the builder tool once, then run it against this repo's manifest:
+
+```bash
+go install go.opentelemetry.io/collector/cmd/builder@latest
+cd otelcol
+"$(go env GOPATH)/bin/builder" --config builder-config.yaml
+```
+
+This downloads the pinned `opentelemetry-collector-contrib` receiver/
+exporter/extension versions from `builder-config.yaml`, generates a small
+`main.go`/`go.mod` under `otelcol/dist/`, and compiles the binary there:
+`otelcol/dist/sgcia-otelcol`.
+
+**Bumping a security patch later**: edit the `v0.x.0` version strings in
+`otelcol/builder-config.yaml` to the new contrib release, then re-run the
+same `builder --config builder-config.yaml` command from inside `otelcol/`.
+
+### 3. Build `sgcia` (the dashboard/editor)
+
+**Prerequisite: a C linker/compiler**, which Rust needs to link the final
+binary regardless of whether the project itself has any C code -- a fresh
+Ubuntu/Debian box has none installed by default and fails with
+``error: linker `cc` not found`` on the very first `cargo build`
+otherwise.
 
 ```bash
 # Debian / Ubuntu
@@ -55,181 +104,82 @@ sudo pacman -S --needed base-devel git
 xcode-select --install
 ```
 
-Then install a Rust toolchain, if you don't have one (this works the
-same way on every platform above):
+Then install a Rust toolchain, if you don't have one (same on every
+platform above). Run this as your normal user, **not** with `sudo` --
+`sudo sh ...` here would install Rust for the `root` account instead of
+yours, leaving you with a broken, split install once later steps run as
+your normal user and can't find it.
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
 ```
 
-Run this as your normal user, **not** with `sudo`. `sudo sh ...` here
-would install Rust for the `root` account instead of yours (into
-`/root/.cargo`, a directory your own user can't even read), while every
-later step in this guide (`cargo build`, `sgcia --version`, etc.) still
-runs as your normal user and expects to find it in `~/.cargo` -- mixing
-the two leaves you with a broken, split install.
-
-#### 2. Get the code
-
-```bash
-git clone https://github.com/mickbrowns1/securitygingercia.git
-cd securitygingercia
-```
-
-#### 3. Build
+Build, from the repo root (not `otelcol/` -- this is a separate Cargo
+workspace at the top level):
 
 ```bash
 cargo build --release
 ```
 
 If this is the first thing you're compiling on the machine and it fails
-with a linker error, go back to step 1 -- that's what it means.
+with a linker error, go back to the prerequisite above -- that's what it
+means.
 
 The binary lands at `target/release/sgcia` (macOS/Linux) or
-`target\release\sgcia.exe` (Windows). It's been built and its automated
-test suite run on **macOS** and **Linux**; the Windows Event Log receiver
-compiles and type-checks for Windows but has not been run against a real
-Windows host yet -- see the note in
-[`crates/sg-receiver-winevtlog`](crates/sg-receiver-winevtlog) if you're
-relying on it.
+`target\release\sgcia.exe` (Windows).
 
-**Build on the machine you intend to run it on, rather than
-cross-compiling.** This project pulls in `ring` (via `reqwest`/`rustls`
-for TLS), which has C code that needs a matching cross-toolchain and
-sysroot to cross-compile correctly -- native compilation sidesteps that
-entirely.
+### 4. Install both binaries
 
-If you specifically want a fully static Linux binary (e.g. for a minimal
-container image), build against the musl target **on a Linux machine**:
+Right after building, each program exists as a file, but your computer
+doesn't yet know it's a command you can type by name -- it only knows how
+to find it if you tell it the exact location. Installing just means:
+copy each file into a folder your computer already checks automatically.
 
 ```bash
-rustup target add x86_64-unknown-linux-musl
-cargo build --release --target x86_64-unknown-linux-musl --bin sgcia
-# binary: target/x86_64-unknown-linux-musl/release/sgcia
+sudo install -m 755 otelcol/dist/sgcia-otelcol /usr/local/bin/sgcia-otelcol
+sudo install -m 755 target/release/sgcia /usr/local/bin/sgcia
 ```
 
-### Installing the binary (Linux/macOS)
+`sudo` will ask for **your own login password** (not a special admin
+password) -- nothing appears on screen while you type it, that's normal.
 
-Right after `cargo build --release` finishes, the program exists as a
-file, but your computer doesn't yet know it's a command you can type by
-name (`sgcia`) -- it only knows how to find it if you tell it the exact
-location (`./target/release/sgcia`). Installing it just means: copy that
-file into one of the folders your computer already checks automatically
-whenever you type a command name.
+Check both worked:
 
-Follow these steps in order.
+```bash
+sgcia-otelcol --version
+sgcia --version
+```
 
-1. **Make sure you're in the right folder first** -- the main
-   `securitygingercia` folder you got from `git clone`, not a subfolder
-   like `configs` inside it (an easy mistake if you were just looking at
-   the example config). Run:
+If either says `command not found`, either the file wasn't actually
+built (re-check step 2 or 3's output for errors), or your terminal cached
+its list of known commands before the install -- open a **brand new
+terminal window** (or run `hash -r`) and try again.
 
-   ```bash
-   ls
-   ```
+Finally, create the two folders these binaries expect to use, for the
+config file and working data (checkpoints/bookmarks via the
+`file_storage` extension):
 
-   You should see `Cargo.toml`, `README.md`, `configs`, `crates`, and
-   `target` all listed together. If you don't see all of those (for
-   example, you only see `example.yaml` and `smoke-test.yaml`), you're
-   one folder too deep -- run `cd ..` and check with `ls` again until
-   you do see all of them.
+```bash
+sudo mkdir -p /etc/sgcia /var/lib/sgcia
+sudo chown "$USER" /etc/sgcia /var/lib/sgcia
+```
 
-2. **Check the file actually exists.** This makes sure the build really
-   finished before you go any further:
-
-   ```bash
-   ls -lh target/release/sgcia
-   ```
-
-   You should see one line of output describing a file a few megabytes
-   in size. If instead you see something like `No such file or
-   directory`, either you're still in the wrong folder (go back to step
-   1), or the build didn't finish -- go back to the [Build](#3-build)
-   step above and fix whatever error `cargo build --release` printed
-   before continuing.
-
-3. **Copy it into `/usr/local/bin`**, a standard folder that's already
-   set up to hold commands you can run by name:
-
-   ```bash
-   sudo install -m 755 target/release/sgcia /usr/local/bin/sgcia
-   ```
-
-   - `sudo` means "do this as an administrator" -- it's needed because
-     `/usr/local/bin` is a system folder. It will ask for **your own
-     login password** (not a special admin password). Type it and press
-     Enter -- nothing will appear on screen while you type, not even
-     dots, that's normal, just type it correctly and hit Enter.
-   - `install -m 755 <source> <destination>` copies the file from
-     `target/release/sgcia` to `/usr/local/bin/sgcia` and marks it as
-     "OK to run as a program" at the same time (a plain `cp` copy
-     wouldn't necessarily do that part).
-
-4. **Check that it worked.** Close nothing, just run:
-
-   ```bash
-   sgcia --version
-   ```
-
-   If you see something like `sgcia 0.1.0`, it worked -- you can now
-   type `sgcia ...` from any folder, any time, and it'll be found. If
-   you instead still see `command not found`, see
-   [Troubleshooting: still says "command not found"](#troubleshooting-still-says-command-not-found)
-   below.
-
-5. **Create the two folders sgcia expects to use** for its config file
-   and its working data (checkpoints, bookmarks):
-
-   ```bash
-   sudo mkdir -p /etc/sgcia /var/lib/sgcia
-   sudo chown "$USER" /etc/sgcia /var/lib/sgcia
-   ```
-
-   `/etc/sgcia` is where its config file (`config.yaml`) will live.
-   `/var/lib/sgcia` is a reasonable default place for file-tail
-   checkpoints and Windows Event Log bookmarks (see
-   `checkpoint_file`/`bookmark_file` in your config) -- sgcia creates
-   those files itself as it runs, but the folder needs to already exist.
-   The `chown` makes both folders writable by you directly, so you can
-   run `sgcia edit`/`sgcia run` as yourself without `sudo` -- if you
-   later run it as a **systemd service** under its own dedicated user
-   instead (see below), that service account only needs to *read* the
-   config, which a normal `chown`ed file still allows.
-
-You only need to do all five of these steps **once** per machine. After
-that, `sgcia edit --config /etc/sgcia/config.yaml` (or any other `sgcia
-...` command) will just work, from any directory, in any new terminal
-window, forever -- no need to repeat these steps, use `sudo`, or
-remember where `target/release/sgcia` is.
-
-#### Troubleshooting: still says "command not found"
-
-- If step 3's `sudo install ...` printed something like `cannot install
-  target/release/sgcia to /usr/local/bin/sgcia`, you were almost
-  certainly in the wrong folder when you ran it (see step 1) -- `cd ..`
-  back to the main `securitygingercia` folder and confirm with `ls`
-  before retrying steps 2 and 3.
-- Double check step 3 actually completed without an error message. Run
-  `ls -lh /usr/local/bin/sgcia` -- if that also says "No such file or
-  directory", the copy didn't happen; re-run the `sudo install ...`
-  command from step 3 and read its output carefully for errors.
-- Some terminals cache the list of known commands for as long as they're
-  open. If step 4 still fails right after a successful install, open a
-  **brand new terminal window** (or run `hash -r`) and try `sgcia
-  --version` again.
-- As a fallback that always works no matter what: you can skip
-  installing entirely and just always type the full path instead,
-  e.g. `./target/release/sgcia edit --config /etc/sgcia/config.yaml`,
-  run from inside the `securitygingercia` folder.
+The `chown` makes both folders writable by you directly, so you can run
+`sgcia edit`/`sgcia-otelcol` as yourself without `sudo` while testing --
+running as a **systemd service** under its own dedicated user later (see
+below) only needs *read* access to the config, which a normal `chown`ed
+file still allows.
 
 ## Configuring
 
-Config is a single YAML file with four top-level sections: `receivers`,
-`operators`, `exporters`, and `service.pipelines` (which wires the other
-three together by name). [`configs/example.yaml`](configs/example.yaml)
-is a complete, documented reference covering every receiver, operator,
-and exporter type.
+Config is a single YAML file in real OpenTelemetry Collector shape:
+top-level `receivers`, `exporters`, and `extensions` (each an id-keyed
+map), plus `service.pipelines` wiring named receivers/exporters together.
+[`otelcol/config/example.yaml`](otelcol/config/example.yaml) is a
+complete, documented reference covering every receiver, exporter, and
+extension type this distribution ships, including the inline `operators:`
+vocabulary.
 
 Two ways to build your own:
 
@@ -237,24 +187,24 @@ Two ways to build your own:
   [Using sgcia](#using-sgcia) below for the keybindings. Must be run from
   an actual interactive terminal (SSH session, local shell); it won't
   work piped through something non-interactive like a CI job.
-- **By hand**: copy `configs/example.yaml` and edit the YAML directly,
-  then `sgcia check --config /etc/sgcia/config.yaml` to validate.
+- **By hand**: copy `otelcol/config/example.yaml` and edit the YAML
+  directly, then `sgcia-otelcol validate --config file:/etc/sgcia/config.yaml`
+  to check it.
 
 ### Secrets
 
 HEC tokens are referenced in the config as `${VAR_NAME}` (e.g. `token:
 ${S1_HEC_TOKEN}`) and substituted from the process environment at load
-time -- the literal `${...}` stays in the YAML file on disk, so the
-config itself never contains a real secret. Two ways to supply the real
-value, depending on how you're running sgcia:
+time (via the collector's built-in `env` provider) -- the literal
+`${...}` stays in the YAML file on disk, so the config itself never
+contains a real secret. Two ways to supply the real value:
 
 **Option A: a quick terminal test.** Export the variable in the same
-shell session before running `sgcia`:
+shell session before running the collector:
 
 ```bash
 export S1_HEC_TOKEN="your-sentinelone-token"
-export SPLUNK_HEC_TOKEN="your-splunk-token"
-sgcia run --config /etc/sgcia/config.yaml
+sgcia-otelcol --config file:/etc/sgcia/config.yaml
 ```
 
 This only lasts for that terminal session -- close it and you'd need to
@@ -272,64 +222,53 @@ sudo "$EDITOR" /etc/sgcia/sgcia.env   # fill in your real tokens
 sudo chmod 600 /etc/sgcia/sgcia.env   # secrets file, keep it non-world-readable
 ```
 
-(The systemd walkthrough below also has this same file, since the
-service needs it regardless of whether you set it up now or then.)
-
 ### Privileged ports
 
 Standard syslog ports (UDP/TCP 514, TCP 601) are below 1024, so binding
 them as a non-root user needs an explicit capability grant. See
 [Running as a systemd service](#running-as-a-systemd-service-linux) below,
-or point `listen_address` at an unprivileged port (e.g. `0.0.0.0:5514`)
-and have your network/firewall layer forward/NAT 514 to it instead.
+or point `udp.listen_address`/`tcp.listen_address` at an unprivileged
+port (e.g. `0.0.0.0:5514`) and have your network/firewall layer
+forward/NAT 514 to it instead.
 
 ## Using sgcia
 
 ```
-sgcia run --config x.yaml [--status-addr 127.0.0.1:7801]   # run the collector
-sgcia check --config x.yaml                                # validate config, print pipeline graph
-sgcia edit --config x.yaml                                  # interactive config editor
-sgcia dashboard [--status-addr 127.0.0.1:7801]              # live monitoring dashboard
+sgcia-otelcol --config file:x.yaml                # run the collector
+sgcia-otelcol validate --config file:x.yaml        # validate config, then exit
+sgcia edit --config x.yaml                         # interactive config editor
+sgcia dashboard [--status-addr 127.0.0.1:7801]     # live monitoring dashboard
 ```
 
-### `sgcia check` -- validate a config
+### `sgcia-otelcol validate` -- validate a config
 
 ```console
-$ export S1_HEC_TOKEN=... SPLUNK_HEC_TOKEN=...
-$ sgcia check --config configs/example.yaml
-Resolved pipeline graph:
-  pipeline: logs/files
-    receivers: filelog/app [filelog]
-    operators: parse_timestamp [parse_timestamp]
-    exporters: sentinelone_hec [sentinelone_hec]
-  pipeline: logs/syslog
-    receivers: syslog/udp [syslog], syslog/tcp [syslog]
-    operators: parse_kv [parse_kv], extract_asa_fields [extract_asa_fields], map_severity [map_severity], parse_timestamp [parse_timestamp], add_datasource [add_datasource], move_message_to_body [move_message_to_body]
-    exporters: sentinelone_hec [sentinelone_hec], splunk_hec [splunk_hec]
-  pipeline: logs/windows
-    receivers: windows_eventlog/security [windows_eventlog]
-    operators: (none)
-    exporters: sentinelone_hec [sentinelone_hec]
-
-config OK
+$ export S1_HEC_TOKEN=...
+$ sgcia-otelcol validate --config file:otelcol/config/example.yaml
+$ echo $?
+0
 ```
 
 Catches structural problems (a pipeline referencing a receiver/exporter
 that doesn't exist, an empty required list) and per-component validation
 (bad regex, unparseable listen address, invalid URL, etc.) before you
-ever try to run it.
+ever try to run it. Prints nothing and exits 0 on success; prints the
+specific problem and exits non-zero otherwise.
 
-### `sgcia run` -- run the collector
+### `sgcia-otelcol` -- run the collector
 
 ```bash
 export S1_HEC_TOKEN=...           # whatever your config references
-sgcia run --config /etc/sgcia/config.yaml --status-addr 127.0.0.1:7801
+sgcia-otelcol --config file:/etc/sgcia/config.yaml
 ```
 
 Runs in the foreground, logging to stdout, until it receives `Ctrl-C`
 (SIGINT) or SIGTERM, at which point it stops accepting new input, drains
 whatever's already in flight through each pipeline, and exits cleanly.
-`--status-addr` is optional; omit it to skip starting the status API.
+The `statuscfg` extension in your config (see
+[`otelcol/config/example.yaml`](otelcol/config/example.yaml)) is what
+`sgcia dashboard`/`sgcia edit` talk to -- there's no separate CLI flag for
+it, it's configured like any other extension.
 
 ### `sgcia dashboard` -- live monitoring
 
@@ -338,10 +277,12 @@ sgcia dashboard --status-addr 127.0.0.1:7801
 ```
 
 Polls `GET /status` on the given address once a second and renders three
-tables: receivers (events in), pipelines (in/out/dropped/parse errors),
-and exporters (batches sent/retried/failed, last error). If the
-connection drops, it shows a red banner but keeps the last good snapshot
-on screen rather than blanking. Press `q` or `Esc` to quit.
+tables: receivers (events in), pipelines (in/out/dropped), and exporters
+(batches sent/retried/failed, last error). If the connection drops, it
+shows a red banner but keeps the last good snapshot on screen rather than
+blanking. Press `q` or `Esc` to quit. `127.0.0.1:7801` is the default for
+both this flag and the `statuscfg` extension's own `endpoint`, so with the
+example config as-is, no flags are needed at all.
 
 ### `sgcia edit` -- interactive config editor
 
@@ -350,19 +291,20 @@ sgcia edit --config /etc/sgcia/config.yaml
 ```
 
 Works entirely offline against the YAML file -- it never talks to a
-running `sgcia run` process. Changes only take effect once you restart
-the collector.
+running `sgcia-otelcol` process. Changes only take effect once you
+restart the collector. Every save shells out to the real `sgcia-otelcol
+validate` (so it must be installed and on `PATH`, or pointed at via the
+`SGCIA_OTELCOL_BIN` environment variable) -- there's no separate
+Rust-side validator to drift out of sync with the real thing.
 
 Every screen shows help as you go: picking a type shows a one-line
 description of what it does, and editing a component shows a plain-
 English explanation (with an example value) for whichever field is
-currently highlighted, at the bottom of the screen. You don't need to
-already know what `poll_interval` or `checkpoint_file` means -- read the
-line at the bottom before typing.
+currently highlighted, at the bottom of the screen.
 
 | Key | Action |
 |---|---|
-| `Tab` / `Shift+Tab` | Switch between Receivers / Operators / Exporters / Pipelines tabs |
+| `Tab` / `Shift+Tab` | Switch between Receivers / Exporters / Extensions / Pipelines tabs |
 | `Up` / `Down` | Move selection within the current tab |
 | `Enter` | Edit the selected item |
 | `a` | Add a new item (pick a type, name it, then edit its fields) |
@@ -371,13 +313,13 @@ line at the bottom before typing.
 | `q` / `Esc` | Quit |
 
 While editing a component's fields: `Tab`/`Shift+Tab` moves between
-fields, `Left`/`Right` cycles enum-type fields (protocol, start_at,
-etc.), any other key types into the focused text field, `Enter` saves
-the form (back to the list), `Esc` discards changes to that component.
-Newly-added fields often start pre-filled with a placeholder value (so
-the form is never blank) -- press `Ctrl+U` to clear a field's current
-text before typing your real value, rather than typing in front of or
-after the placeholder by mistake.
+fields, `Left`/`Right` cycles enum-type and true/false fields, any other
+key types into the focused text field, `Esc` discards changes to that
+component. A receiver's `operators` field is different: pressing `Enter`
+on it opens a sub-screen for managing that receiver's inline parsing
+chain (same `a`/`Enter`/`d`/`Esc` keys, one level deeper) instead of
+submitting the form -- `Tab` off of it first if you meant to save the
+whole component instead.
 
 #### Walkthrough: build a minimal working config from scratch
 
@@ -390,38 +332,33 @@ the whole tool work end to end before wiring up a real HEC endpoint.
 2. You're on the **Receivers** tab, and it's empty. Press `a` to add one.
 3. A list of receiver types appears, with a description of the
    highlighted one at the bottom. Use `Up`/`Down` to look them over, then
-   press `Enter` on **filelog** (tails a file from disk).
-4. It asks for an id -- type `filelog/test` and press `Enter`.
+   press `Enter` on **file_log** (tails a file from disk).
+4. It asks for an id -- type `file_log/test` and press `Enter`.
 5. You're now editing its fields. Press `Tab` to move between them and
-   read the help line at the bottom for each one. Two fields start
-   pre-filled with the word `placeholder` -- press `Ctrl+U` to clear
-   each one before typing over it:
-   - `include`: clear it, then type a real file on your machine, e.g.
-     `/var/log/syslog` (Linux) or `/var/log/system.log` (macOS)
-   - `checkpoint_file`: clear it, then type a path sgcia can create and
-     write to, e.g. `/tmp/test.checkpoint.json`
+   read the help line at the bottom for each one:
+   - `include`: type a real file on your machine, e.g. `/var/log/syslog`
+     (Linux) or `/var/log/system.log` (macOS)
    - leave everything else at its default
    Press `Enter` to save this component (back to the Receivers list).
-6. Press `Tab` twice to reach the **Exporters** tab (tabs go Receivers →
-   Operators → Exporters → Pipelines), then `a` to add one. Pick
-   **stdout** (prints events to the screen, no setup needed) and name it
-   `debug`. Press `Enter` on its (empty) field list to confirm it.
-7. Press `Tab` once more to reach the **Pipelines** tab, then `a` to add
-   one. Name it `test`.
-8. On its field list: set `receivers` to `filelog/test` and `exporters`
-   to `debug` (leave `operators` blank -- that's fine, it just means no
-   parsing happens, the raw log lines get sent as-is). Press `Enter` to
-   save.
+6. Press `Tab` to reach the **Exporters** tab, then `a` to add one. Pick
+   **debug** (prints events to the screen, no setup needed) and name it
+   `debug`. Press `Enter` on its field list to confirm it.
+7. Press `Tab` twice more to reach the **Pipelines** tab (tabs go
+   Receivers → Exporters → Extensions → Pipelines), then `a` to add one.
+   Name it `test`.
+8. On its field list: set `receivers` to `file_log/test` and `exporters`
+   to `debug`. Press `Enter` to save.
 9. Press `s` to validate and save the whole file. The status line at the
    bottom will say `saved test.yaml` if everything's valid, or explain
    what's wrong if not.
-10. Press `q` to quit, then try it: `sgcia run --config test.yaml` --
-    you should see JSON lines print to your terminal as new lines get
+10. Press `q` to quit, then try it: `sgcia-otelcol --config file:test.yaml`
+    -- you should see log lines print to your terminal as new lines get
     written to the file you picked in step 5.
 
-From there, add `operators` (see [`configs/example.yaml`](configs/example.yaml)
-for real examples of `regex`/`kv`/`timestamp` parsing) and swap the
-`stdout` exporter for a real `s1hec`/`splunkhec` one once you're ready.
+From there, add `operators` to the receiver (see
+[`otelcol/config/example.yaml`](otelcol/config/example.yaml) for real
+examples of `regex_parser`/`key_value_parser`/`time_parser` parsing) and
+swap the `debug` exporter for a real `splunk_hec` one once you're ready.
 
 ## Running as a systemd service (Linux)
 
@@ -438,7 +375,7 @@ sudo cp packaging/systemd/sgcia.env.example /etc/sgcia/sgcia.env
 sudo "$EDITOR" /etc/sgcia/sgcia.env   # fill in real HEC token(s)
 sudo chown sgcia:sgcia /etc/sgcia/sgcia.env
 sudo chmod 600 /etc/sgcia/sgcia.env   # secrets file, keep it non-world-readable
-sudo "$EDITOR" /etc/sgcia/config.yaml # your actual config (start from configs/example.yaml)
+sudo "$EDITOR" /etc/sgcia/config.yaml # your actual config (start from otelcol/config/example.yaml)
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now sgcia
@@ -449,9 +386,9 @@ journalctl -u sgcia -f
 The unit grants `CAP_NET_BIND_SERVICE` so the non-root `sgcia` user can
 bind privileged ports (514/601) -- remove that line if every
 `listen_address` in your config is unprivileged (>= 1024). It also sets
-`ProtectSystem=strict`, so if your `checkpoint_file`/`bookmark_file`
-paths point outside `/var/lib/sgcia`, either move them under it or add
-the real directory to `ReadWritePaths=` in the unit.
+`ProtectSystem=strict`, so if your config's `file_storage` extension's
+`directory` points outside `/var/lib/sgcia`, either move it under there
+or add the real directory to `ReadWritePaths=` in the unit.
 
 Once it's running as a service, use `sgcia dashboard` and `sgcia edit`
 over an actual SSH session to the box (not through `systemctl` or a
@@ -462,35 +399,38 @@ sgcia dashboard --status-addr 127.0.0.1:7801
 sgcia edit --config /etc/sgcia/config.yaml   # then `sudo systemctl restart sgcia` to apply
 ```
 
-## The status API
+## The status endpoint
 
-When `sgcia run` is started with `--status-addr`, it serves two
-read-only, unauthenticated endpoints on that address (bind it to
-loopback unless you have another way to restrict access -- there's no
-auth, and the loopback binding is the security boundary):
+The `statuscfg` extension (a small local addition, not part of upstream
+contrib -- see
+[`otelcol/extensions/statuscfgextension`](otelcol/extensions/statuscfgextension))
+serves two read-only, unauthenticated endpoints on the address set by its
+`endpoint` field (bind it to loopback unless you have another way to
+restrict access -- there's no auth, and the loopback binding is the
+security boundary):
 
 - `GET /status` -- a JSON metrics snapshot: `started_at`,
-  `uptime_seconds`, and per-receiver/pipeline/exporter counters. This is
-  what `sgcia dashboard` polls; useful directly too (`curl` it from a
-  monitoring script, feed it to your own dashboard, etc).
-- `GET /config` -- the resolved config as JSON, with any field named
+  `uptime_seconds`, and per-receiver/pipeline/exporter counters, derived
+  from the collector's own internal Prometheus telemetry (see the
+  extension's `metrics_url` field). This is what `sgcia dashboard` polls;
+  useful directly too (`curl` it from a monitoring script, feed it to
+  your own dashboard, etc).
+- `GET /config` -- the same config file passed to `sgcia-otelcol`'s own
+  `--config` flag, re-read and served as JSON, with any field named
   `token`, `password`, `secret`, `api_key`, or `apikey` replaced with
   `"***redacted***"` at any nesting depth.
 
 ```console
 $ curl -s http://127.0.0.1:7801/status | jq .
 {
-  "started_at": "2026-07-28T20:24:24.891509Z",
-  "uptime_seconds": 113,
-  "receivers": { "filelog/smoke": { "events_in": 1 } },
+  "started_at": "2026-08-03T12:51:24.878639-04:00",
+  "uptime_seconds": 19,
+  "receivers": { "syslog/tcp": { "events_in": 1 } },
   "pipelines": {
-    "logs/smoke": {
-      "events_in": 1, "events_out": 1, "events_dropped": 0,
-      "events_dead_lettered": 0, "parse_errors": 0
-    }
+    "logs/syslog": { "events_in": 1, "events_out": 1, "events_dropped": 0 }
   },
   "exporters": {
-    "debug_stdout": {
+    "splunk_hec/sentinelone": {
       "events_in": 1, "batches_sent": 1, "batches_failed": 0,
       "retries": 0, "last_error": null
     }
@@ -498,14 +438,38 @@ $ curl -s http://127.0.0.1:7801/status | jq .
 }
 ```
 
+`batches_sent`/`batches_failed`/`retries`/`last_error` are a best-effort
+approximation derived from the collector's own record-count telemetry
+(OTel doesn't expose a per-pipeline metric or a literal "last error
+message" at the default telemetry level) -- see the comments in
+`otelcol/extensions/statuscfgextension/extension.go` for exactly what's
+approximated and why.
+
 ## Development
+
+Two independent things to build/test, matching the two binaries above.
+
+**The collector engine** (`otelcol/`, Go -- `extensions/statuscfgextension`
+is its own Go module, independent of the generated `dist/` module):
+
+```bash
+(cd otelcol/extensions/statuscfgextension && go test ./...)
+
+cd otelcol
+"$(go env GOPATH)/bin/builder" --config builder-config.yaml
+./dist/sgcia-otelcol validate --config file:config/example.yaml
+```
+
+**The dashboard/editor** (repo root, Rust):
 
 ```bash
 cargo build --workspace
-cargo test --workspace     # 100+ tests across every crate
+cargo test --workspace
 cargo clippy --workspace --all-targets
 ```
 
-Each crate under `crates/` is independently testable; see the module-level
-doc comments (`//!` at the top of each `lib.rs`/`mod.rs`) for what each
-one owns.
+`crates/collector/src/editor`'s own test suite includes an integration
+test that runs the real `sgcia-otelcol validate` (skipped automatically,
+not failed, if that binary hasn't been built yet at the conventional
+`otelcol/dist/sgcia-otelcol` path or via `SGCIA_OTELCOL_BIN`) -- build the
+Go side first if you want that coverage included.

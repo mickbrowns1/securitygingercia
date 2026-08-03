@@ -4,3 +4,8 @@
 *.checkpoint.json
 *.checkpoint.json.tmp
 .DS_Store
+
+# Go build artifacts: OCB regenerates these from otelcol/builder-config.yaml
+# (main.go, go.mod, go.sum, the compiled binary itself).
+/otelcol/dist/
+/otelcol/.smoke-test/

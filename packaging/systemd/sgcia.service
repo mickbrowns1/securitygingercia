@@ -1,5 +1,5 @@
 [Unit]
-Description=Security Ginger Collect It All (sgcia) - log collector
+Description=Security Ginger Collect It All (sgcia) - OTel-based log collector
 After=network-online.target
 Wants=network-online.target
 
@@ -8,7 +8,12 @@ Type=simple
 User=sgcia
 Group=sgcia
 EnvironmentFile=-/etc/sgcia/sgcia.env
-ExecStart=/usr/local/bin/sgcia run --config /etc/sgcia/config.yaml --status-addr 127.0.0.1:7801
+# The collector engine itself is sgcia-otelcol, an OpenTelemetry Collector
+# distribution built via `ocb --config otelcol/builder-config.yaml` (see
+# README.md). Its statuscfg extension (configured inside config.yaml, not
+# via a CLI flag) is what `sgcia dashboard`/`sgcia edit` poll -- there's no
+# separate --status-addr flag on this binary.
+ExecStart=/usr/local/bin/sgcia-otelcol --config file:/etc/sgcia/config.yaml
 Restart=on-failure
 RestartSec=5s
 WorkingDirectory=/var/lib/sgcia
@@ -19,9 +24,9 @@ WorkingDirectory=/var/lib/sgcia
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 
-# Light sandboxing. Adjust ReadWritePaths if your config's
-# checkpoint_file/bookmark_file paths point somewhere other than
-# /var/lib/sgcia.
+# Light sandboxing. Adjust ReadWritePaths if your config's file_storage
+# extension's `directory` (checkpoint/bookmark persistence) points
+# somewhere other than /var/lib/sgcia.
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/sgcia

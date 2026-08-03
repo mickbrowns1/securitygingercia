@@ -1,6 +1,6 @@
-//! Live dashboard TUI: polls a running `sgcia run --status-addr`
-//! process's status API once a second and renders per-receiver/pipeline/
-//! exporter counters.
+//! Live dashboard TUI: polls a running `sgcia-otelcol` process's
+//! statuscfg extension (see `otelcol/extensions/statuscfgextension`) once
+//! a second and renders per-receiver/pipeline/exporter counters.
 
 mod app;
 mod client;

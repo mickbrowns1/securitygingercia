@@ -3,15 +3,6 @@ resolver = "2"
 members = [
     "crates/collector",
     "crates/sg-core",
-    "crates/sg-config",
-    "crates/sg-checkpoint",
-    "crates/sg-receiver-syslog",
-    "crates/sg-receiver-file",
-    "crates/sg-receiver-winevtlog",
-    "crates/sg-operators",
-    "crates/sg-exporter-core",
-    "crates/sg-exporter-s1-hec",
-    "crates/sg-exporter-splunk-hec",
 ]
 
 [workspace.package]
@@ -22,16 +13,11 @@ license = "MIT"
 [workspace.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "fs", "time", "signal", "sync", "macros", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml_ng = "0.10"
-bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
-regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-globset = "0.4"
-notify = "6"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -43,14 +29,6 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 tui-input = "0.15"
 
 sg-core = { path = "crates/sg-core" }
-sg-config = { path = "crates/sg-config" }
-sg-checkpoint = { path = "crates/sg-checkpoint" }
-sg-receiver-syslog = { path = "crates/sg-receiver-syslog" }
-sg-receiver-file = { path = "crates/sg-receiver-file" }
-sg-operators = { path = "crates/sg-operators" }
-sg-exporter-core = { path = "crates/sg-exporter-core" }
-sg-exporter-s1-hec = { path = "crates/sg-exporter-s1-hec" }
-sg-exporter-splunk-hec = { path = "crates/sg-exporter-splunk-hec" }
 
 [profile.release]
 lto = true

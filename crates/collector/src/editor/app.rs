@@ -12,29 +12,22 @@ const PIPELINE_FIELDS: &[FieldSpec] = &[
         kind: FieldKind::StringList,
         required: false,
         default: None,
-        help: "Which receivers feed this pipeline, by id -- e.g. syslog/udp, filelog/app. Comma-separate multiple.",
-    },
-    FieldSpec {
-        key: "operators",
-        kind: FieldKind::StringList,
-        required: false,
-        default: None,
-        help: "Which operators to run, in order, by id -- e.g. extract_asa_fields, add_datasource. Comma-separate multiple; leave blank to skip parsing entirely.",
+        help: "Which receivers feed this pipeline, by id -- e.g. syslog/udp, file_log/app. Comma-separate multiple.",
     },
     FieldSpec {
         key: "exporters",
         kind: FieldKind::StringList,
         required: false,
         default: None,
-        help: "Where processed events get sent, by exporter id -- e.g. sentinelone_hec. Comma-separate multiple to fan out to more than one.",
+        help: "Where processed events get sent, by exporter id -- e.g. splunk_hec/sentinelone. Comma-separate multiple to fan out to more than one.",
     },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopTab {
     Receivers,
-    Operators,
     Exporters,
+    Extensions,
     Pipelines,
 }
 
@@ -42,17 +35,17 @@ impl TopTab {
     fn category(self) -> Option<ComponentCategory> {
         match self {
             TopTab::Receivers => Some(ComponentCategory::Receiver),
-            TopTab::Operators => Some(ComponentCategory::Operator),
             TopTab::Exporters => Some(ComponentCategory::Exporter),
+            TopTab::Extensions => Some(ComponentCategory::Extension),
             TopTab::Pipelines => None,
         }
     }
 
     fn next(self) -> Self {
         match self {
-            TopTab::Receivers => TopTab::Operators,
-            TopTab::Operators => TopTab::Exporters,
-            TopTab::Exporters => TopTab::Pipelines,
+            TopTab::Receivers => TopTab::Exporters,
+            TopTab::Exporters => TopTab::Extensions,
+            TopTab::Extensions => TopTab::Pipelines,
             TopTab::Pipelines => TopTab::Receivers,
         }
     }
@@ -60,17 +53,17 @@ impl TopTab {
     fn prev(self) -> Self {
         match self {
             TopTab::Receivers => TopTab::Pipelines,
-            TopTab::Operators => TopTab::Receivers,
-            TopTab::Exporters => TopTab::Operators,
-            TopTab::Pipelines => TopTab::Exporters,
+            TopTab::Exporters => TopTab::Receivers,
+            TopTab::Extensions => TopTab::Exporters,
+            TopTab::Pipelines => TopTab::Extensions,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             TopTab::Receivers => "Receivers",
-            TopTab::Operators => "Operators",
             TopTab::Exporters => "Exporters",
+            TopTab::Extensions => "Extensions",
             TopTab::Pipelines => "Pipelines",
         }
     }
@@ -78,34 +71,42 @@ impl TopTab {
 
 pub enum FieldEditState {
     Text(Input),
+    Bool(bool),
     Enum { options: &'static [&'static str], selected: usize },
     StringList(Input),
-    RawJson(Input),
+    /// A receiver's inline `operators:` list -- edited through its own
+    /// sub-screen (see `Screen::OperatorList` and friends), never as
+    /// text; this just holds the staged value between App transitions.
+    OperatorList(Vec<Value>),
 }
 
 pub struct FormState {
     /// `None` for the synthetic "pipeline" pseudo-component, which has no
-    /// `type` key of its own.
+    /// type of its own. Used for display (the type's description) --
+    /// whether it's actually written into the value is `write_type_key`.
     pub type_name: Option<&'static str>,
+    /// OTel infers a receiver/exporter/extension's type from its id
+    /// prefix alone, so those forms must NOT write a `type:` key.
+    /// Operators have no id of their own, so their form must.
+    pub write_type_key: bool,
     pub fields_spec: &'static [FieldSpec],
     pub fields: Vec<FieldEditState>,
     pub focused: usize,
 }
 
 impl FormState {
-    pub fn new(type_name: Option<&'static str>, fields_spec: &'static [FieldSpec], value: &Value) -> Self {
-        let fields = fields_spec
-            .iter()
-            .map(|spec| field_edit_state_from(spec, value.get(spec.key)))
-            .collect();
-        Self { type_name, fields_spec, fields, focused: 0 }
+    pub fn new(
+        type_name: Option<&'static str>,
+        write_type_key: bool,
+        fields_spec: &'static [FieldSpec],
+        value: &Value,
+    ) -> Self {
+        let fields = fields_spec.iter().map(|spec| field_edit_state_from(spec, value)).collect();
+        Self { type_name, write_type_key, fields_spec, fields, focused: 0 }
     }
 
     pub fn to_value(&self) -> Value {
         let mut map = Map::new();
-        if let Some(type_name) = self.type_name {
-            map.insert("type".to_string(), json!(type_name));
-        }
         for (spec, state) in self.fields_spec.iter().zip(&self.fields) {
             match state {
                 FieldEditState::Text(input) => {
@@ -113,10 +114,13 @@ impl FormState {
                     if text.is_empty() {
                         continue;
                     }
-                    map.insert(spec.key.to_string(), parse_scalar(spec.kind, text));
+                    schema_registry::set_path(&mut map, spec.key, json!(text));
+                }
+                FieldEditState::Bool(checked) => {
+                    schema_registry::set_path(&mut map, spec.key, json!(*checked));
                 }
                 FieldEditState::Enum { options, selected } => {
-                    map.insert(spec.key.to_string(), json!(options[*selected]));
+                    schema_registry::set_path(&mut map, spec.key, json!(options[*selected]));
                 }
                 FieldEditState::StringList(input) => {
                     let items: Vec<&str> = input
@@ -128,19 +132,55 @@ impl FormState {
                     if items.is_empty() {
                         continue;
                     }
-                    map.insert(spec.key.to_string(), json!(items));
+                    schema_registry::set_path(&mut map, spec.key, json!(items));
                 }
-                FieldEditState::RawJson(input) => {
-                    let text = input.value();
-                    if text.trim().is_empty() {
+                FieldEditState::OperatorList(ops) => {
+                    if ops.is_empty() {
                         continue;
                     }
-                    let parsed = serde_json::from_str(text).unwrap_or_else(|_| json!(text));
-                    map.insert(spec.key.to_string(), parsed);
+                    schema_registry::set_path(&mut map, spec.key, Value::Array(ops.clone()));
                 }
             }
         }
+        if self.write_type_key {
+            if let Some(type_name) = self.type_name {
+                map.insert("type".to_string(), json!(type_name));
+            }
+        }
         Value::Object(map)
+    }
+
+    fn focused_kind(&self) -> Option<FieldKind> {
+        self.fields_spec.get(self.focused).map(|s| s.kind)
+    }
+
+    /// Moves focus to the next field -- used when leaving the operator
+    /// sub-editor, so the natural "Esc, then Enter" gesture to finish
+    /// editing operators and save the whole form actually submits it,
+    /// rather than Enter re-drilling into the (still-focused) operators
+    /// field.
+    fn advance_focus(&mut self) {
+        self.focused = (self.focused + 1) % self.fields.len().max(1);
+    }
+
+    /// Current value of this form's `operators:` field, if it has one.
+    pub fn operators(&self) -> Vec<Value> {
+        match self.operator_list_index().and_then(|i| self.fields.get(i)) {
+            Some(FieldEditState::OperatorList(ops)) => ops.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn set_operators(&mut self, ops: Vec<Value>) {
+        if let Some(i) = self.operator_list_index() {
+            if let Some(FieldEditState::OperatorList(slot)) = self.fields.get_mut(i) {
+                *slot = ops;
+            }
+        }
+    }
+
+    fn operator_list_index(&self) -> Option<usize> {
+        self.fields_spec.iter().position(|s| matches!(s.kind, FieldKind::OperatorList))
     }
 
     fn on_key(&mut self, key: KeyEvent) -> FormOutcome {
@@ -164,9 +204,15 @@ impl FormState {
                     KeyCode::Right => *selected = (*selected + 1) % options.len(),
                     _ => {}
                 },
-                FieldEditState::Text(input) | FieldEditState::StringList(input) | FieldEditState::RawJson(input) => {
+                FieldEditState::Bool(checked) => {
+                    if matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')) {
+                        *checked = !*checked;
+                    }
+                }
+                FieldEditState::Text(input) | FieldEditState::StringList(input) => {
                     input.handle_event(&Event::Key(key));
                 }
+                FieldEditState::OperatorList(_) => {} // handled one level up (Enter drills in)
             }
         }
         FormOutcome::Continue
@@ -179,7 +225,8 @@ enum FormOutcome {
     Cancel,
 }
 
-fn field_edit_state_from(spec: &FieldSpec, current: Option<&Value>) -> FieldEditState {
+fn field_edit_state_from(spec: &FieldSpec, value: &Value) -> FieldEditState {
+    let current = schema_registry::get_path(value, spec.key);
     match spec.kind {
         FieldKind::Enum(options) => {
             let current_str = current
@@ -188,6 +235,13 @@ fn field_edit_state_from(spec: &FieldSpec, current: Option<&Value>) -> FieldEdit
                 .unwrap_or(options[0]);
             let selected = options.iter().position(|o| *o == current_str).unwrap_or(0);
             FieldEditState::Enum { options, selected }
+        }
+        FieldKind::Bool => {
+            let b = current
+                .and_then(|v| v.as_bool())
+                .or_else(|| spec.default.and_then(|d| d.parse::<bool>().ok()))
+                .unwrap_or(false);
+            FieldEditState::Bool(b)
         }
         FieldKind::StringList => {
             let joined = current
@@ -201,13 +255,11 @@ fn field_edit_state_from(spec: &FieldSpec, current: Option<&Value>) -> FieldEdit
                 .unwrap_or_default();
             FieldEditState::StringList(Input::new(joined))
         }
-        FieldKind::Map => {
-            let text = current
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "{}".to_string());
-            FieldEditState::RawJson(Input::new(text))
+        FieldKind::OperatorList => {
+            let ops = current.and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            FieldEditState::OperatorList(ops)
         }
-        FieldKind::Str | FieldKind::Int | FieldKind::Duration => {
+        FieldKind::Str | FieldKind::Duration => {
             let text = current
                 .map(value_to_display_string)
                 .or_else(|| spec.default.map(str::to_string))
@@ -224,13 +276,6 @@ fn value_to_display_string(value: &Value) -> String {
     }
 }
 
-fn parse_scalar(kind: FieldKind, text: &str) -> Value {
-    match kind {
-        FieldKind::Int => text.parse::<i64>().map(|n| json!(n)).unwrap_or_else(|_| json!(text)),
-        _ => json!(text),
-    }
-}
-
 pub enum Screen {
     TopLevel { tab: TopTab, selected: usize },
     PickType { category: ComponentCategory, selected: usize },
@@ -239,6 +284,19 @@ pub enum Screen {
     EditComponent { category: ComponentCategory, id: String, form: FormState },
     EditPipeline { id: String, form: FormState },
     ConfirmRemove { category: ComponentCategory, id: String, blocking: Vec<String> },
+    /// The receiver/exporter/extension form being edited is `form`;
+    /// `selected` indexes into its current `operators:` list.
+    OperatorList { category: ComponentCategory, id: String, form: FormState, selected: usize },
+    OperatorPickType { category: ComponentCategory, id: String, form: FormState, selected: usize },
+    /// `index` is `None` for a brand new operator being appended, `Some`
+    /// for editing an existing list entry in place.
+    OperatorEdit {
+        category: ComponentCategory,
+        id: String,
+        form: FormState,
+        index: Option<usize>,
+        op_form: FormState,
+    },
 }
 
 impl Default for Screen {
@@ -271,16 +329,16 @@ impl App {
     fn map_for(&self, category: ComponentCategory) -> &Map<String, Value> {
         match category {
             ComponentCategory::Receiver => &self.doc.receivers,
-            ComponentCategory::Operator => &self.doc.operators,
             ComponentCategory::Exporter => &self.doc.exporters,
+            ComponentCategory::Extension => &self.doc.extensions,
         }
     }
 
     fn map_for_mut(&mut self, category: ComponentCategory) -> &mut Map<String, Value> {
         match category {
             ComponentCategory::Receiver => &mut self.doc.receivers,
-            ComponentCategory::Operator => &mut self.doc.operators,
             ComponentCategory::Exporter => &mut self.doc.exporters,
+            ComponentCategory::Extension => &mut self.doc.extensions,
         }
     }
 
@@ -302,30 +360,28 @@ impl App {
         match screen {
             Screen::TopLevel { tab, selected } => self.handle_top_level(tab, selected, key),
             Screen::PickType { category, selected } => self.handle_pick_type(category, selected, key),
-            Screen::NameNewComponent { category, type_name, mut input } => {
-                match key.code {
-                    KeyCode::Esc => Screen::TopLevel { tab: tab_for(category), selected: 0 },
-                    KeyCode::Enter => {
-                        let id = input.value().trim().to_string();
-                        if id.is_empty() || self.map_for(category).contains_key(&id) {
-                            self.status_message = Some(format!("'{id}' is empty or already exists"));
-                            Screen::NameNewComponent { category, type_name, input }
-                        } else {
-                            let spec = schema_registry::types_for(category)
-                                .iter()
-                                .find(|s| s.type_name == type_name)
-                                .expect("type_name comes from the registry");
-                            let seed = schema_registry::minimal_value(spec);
-                            let form = FormState::new(Some(type_name), spec.fields, &seed);
-                            Screen::EditComponent { category, id, form }
-                        }
-                    }
-                    _ => {
-                        input.handle_event(&Event::Key(key));
+            Screen::NameNewComponent { category, type_name, mut input } => match key.code {
+                KeyCode::Esc => Screen::TopLevel { tab: tab_for(category), selected: 0 },
+                KeyCode::Enter => {
+                    let id = input.value().trim().to_string();
+                    if id.is_empty() || self.map_for(category).contains_key(&id) {
+                        self.status_message = Some(format!("'{id}' is empty or already exists"));
                         Screen::NameNewComponent { category, type_name, input }
+                    } else {
+                        let spec = schema_registry::types_for(category)
+                            .iter()
+                            .find(|s| s.type_name == type_name)
+                            .expect("type_name comes from the registry");
+                        let seed = schema_registry::minimal_value(spec);
+                        let form = FormState::new(Some(type_name), false, spec.fields, &seed);
+                        Screen::EditComponent { category, id, form }
                     }
                 }
-            }
+                _ => {
+                    input.handle_event(&Event::Key(key));
+                    Screen::NameNewComponent { category, type_name, input }
+                }
+            },
             Screen::NameNewPipeline { mut input } => match key.code {
                 KeyCode::Esc => Screen::TopLevel { tab: TopTab::Pipelines, selected: 0 },
                 KeyCode::Enter => {
@@ -334,7 +390,7 @@ impl App {
                         self.status_message = Some(format!("'{id}' is empty or already exists"));
                         Screen::NameNewPipeline { input }
                     } else {
-                        let form = FormState::new(None, PIPELINE_FIELDS, &json!({}));
+                        let form = FormState::new(None, false, PIPELINE_FIELDS, &json!({}));
                         Screen::EditPipeline { id, form }
                     }
                 }
@@ -343,17 +399,22 @@ impl App {
                     Screen::NameNewPipeline { input }
                 }
             },
-            Screen::EditComponent { category, id, mut form } => match form.on_key(key) {
-                FormOutcome::Continue => Screen::EditComponent { category, id, form },
-                FormOutcome::Cancel => Screen::TopLevel { tab: tab_for(category), selected: 0 },
-                FormOutcome::Submit => {
-                    let value = form.to_value();
-                    self.map_for_mut(category).insert(id.clone(), value);
-                    self.dirty = true;
-                    self.status_message = Some(format!("{id} updated (press 's' to save to disk)"));
-                    Screen::TopLevel { tab: tab_for(category), selected: 0 }
+            Screen::EditComponent { category, id, mut form } => {
+                if key.code == KeyCode::Enter && matches!(form.focused_kind(), Some(FieldKind::OperatorList)) {
+                    return Screen::OperatorList { category, id, form, selected: 0 };
                 }
-            },
+                match form.on_key(key) {
+                    FormOutcome::Continue => Screen::EditComponent { category, id, form },
+                    FormOutcome::Cancel => Screen::TopLevel { tab: tab_for(category), selected: 0 },
+                    FormOutcome::Submit => {
+                        let value = form.to_value();
+                        self.map_for_mut(category).insert(id.clone(), value);
+                        self.dirty = true;
+                        self.status_message = Some(format!("{id} updated (press 's' to save to disk)"));
+                        Screen::TopLevel { tab: tab_for(category), selected: 0 }
+                    }
+                }
+            }
             Screen::EditPipeline { id, mut form } => match form.on_key(key) {
                 FormOutcome::Continue => Screen::EditPipeline { id, form },
                 FormOutcome::Cancel => Screen::TopLevel { tab: TopTab::Pipelines, selected: 0 },
@@ -374,6 +435,35 @@ impl App {
                     Screen::TopLevel { tab: tab_for(category), selected: 0 }
                 }
                 _ => Screen::TopLevel { tab: tab_for(category), selected: 0 },
+            },
+            Screen::OperatorList { category, id, form, selected } => {
+                self.handle_operator_list(category, id, form, selected, key)
+            }
+            Screen::OperatorPickType { category, id, form, selected } => {
+                self.handle_operator_pick_type(category, id, form, selected, key)
+            }
+            Screen::OperatorEdit { category, id, form, index, mut op_form } => match op_form.on_key(key) {
+                FormOutcome::Continue => Screen::OperatorEdit { category, id, form, index, op_form },
+                FormOutcome::Cancel => {
+                    Screen::OperatorList { category, id, form, selected: index.unwrap_or(0) }
+                }
+                FormOutcome::Submit => {
+                    let value = op_form.to_value();
+                    let mut ops = form.operators();
+                    let selected = match index {
+                        Some(i) if i < ops.len() => {
+                            ops[i] = value;
+                            i
+                        }
+                        _ => {
+                            ops.push(value);
+                            ops.len() - 1
+                        }
+                    };
+                    let mut form = form;
+                    form.set_operators(ops);
+                    Screen::OperatorList { category, id, form, selected }
+                }
             },
         }
     }
@@ -403,7 +493,7 @@ impl App {
                 match tab.category() {
                     Some(category) => {
                         let value = self.map_for(category)[&id].clone();
-                        let type_name = component_type_name(category, &id, &value);
+                        let type_name = schema_registry::component_type(&id);
                         let spec = schema_registry::types_for(category)
                             .iter()
                             .find(|s| s.type_name == type_name)
@@ -411,12 +501,12 @@ impl App {
                         let Some(spec) = spec else {
                             return Screen::TopLevel { tab, selected };
                         };
-                        let form = FormState::new(Some(spec.type_name), spec.fields, &value);
+                        let form = FormState::new(Some(spec.type_name), false, spec.fields, &value);
                         Screen::EditComponent { category, id, form }
                     }
                     None => {
                         let value = self.doc.pipelines[&id].clone();
-                        let form = FormState::new(None, PIPELINE_FIELDS, &value);
+                        let form = FormState::new(None, false, PIPELINE_FIELDS, &value);
                         Screen::EditPipeline { id, form }
                     }
                 }
@@ -483,31 +573,88 @@ impl App {
             _ => Screen::PickType { category, selected },
         }
     }
+
+    fn handle_operator_list(
+        &mut self,
+        category: ComponentCategory,
+        id: String,
+        form: FormState,
+        selected: usize,
+        key: KeyEvent,
+    ) -> Screen {
+        let ops = form.operators();
+        match key.code {
+            KeyCode::Esc => {
+                let mut form = form;
+                form.advance_focus();
+                Screen::EditComponent { category, id, form }
+            }
+            KeyCode::Down => {
+                let next = if ops.is_empty() { 0 } else { (selected + 1).min(ops.len() - 1) };
+                Screen::OperatorList { category, id, form, selected: next }
+            }
+            KeyCode::Up => Screen::OperatorList { category, id, form, selected: selected.saturating_sub(1) },
+            KeyCode::Char('a') => Screen::OperatorPickType { category, id, form, selected: 0 },
+            KeyCode::Enter => {
+                let Some(op_value) = ops.get(selected).cloned() else {
+                    return Screen::OperatorList { category, id, form, selected };
+                };
+                let type_name = op_value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                let Some(spec) = schema_registry::operator_type(type_name) else {
+                    return Screen::OperatorList { category, id, form, selected };
+                };
+                let op_form = FormState::new(Some(spec.type_name), true, spec.fields, &op_value);
+                Screen::OperatorEdit { category, id, form, index: Some(selected), op_form }
+            }
+            KeyCode::Char('d') | KeyCode::Delete => {
+                let mut form = form;
+                if selected < ops.len() {
+                    let mut ops = ops;
+                    ops.remove(selected);
+                    form.set_operators(ops);
+                }
+                Screen::OperatorList { category, id, form, selected: 0 }
+            }
+            _ => Screen::OperatorList { category, id, form, selected },
+        }
+    }
+
+    fn handle_operator_pick_type(
+        &mut self,
+        category: ComponentCategory,
+        id: String,
+        form: FormState,
+        selected: usize,
+        key: KeyEvent,
+    ) -> Screen {
+        let types = schema_registry::operator_types();
+        match key.code {
+            KeyCode::Esc => Screen::OperatorList { category, id, form, selected: 0 },
+            KeyCode::Down => Screen::OperatorPickType {
+                category,
+                id,
+                form,
+                selected: if types.is_empty() { 0 } else { (selected + 1).min(types.len() - 1) },
+            },
+            KeyCode::Up => Screen::OperatorPickType { category, id, form, selected: selected.saturating_sub(1) },
+            KeyCode::Enter => {
+                let Some(spec) = types.get(selected) else {
+                    return Screen::OperatorPickType { category, id, form, selected };
+                };
+                let seed = schema_registry::minimal_value(spec);
+                let op_form = FormState::new(Some(spec.type_name), true, spec.fields, &seed);
+                Screen::OperatorEdit { category, id, form, index: None, op_form }
+            }
+            _ => Screen::OperatorPickType { category, id, form, selected },
+        }
+    }
 }
 
 fn tab_for(category: ComponentCategory) -> TopTab {
     match category {
         ComponentCategory::Receiver => TopTab::Receivers,
-        ComponentCategory::Operator => TopTab::Operators,
         ComponentCategory::Exporter => TopTab::Exporters,
-    }
-}
-
-/// Determines a component's registry type name the same way `build.rs`
-/// actually dispatches it at runtime: receivers are typed by their id's
-/// `type/name` prefix (they have no `type:` field of their own),
-/// exporters and operators by an explicit `type:` key in their value
-/// (falling back to the id prefix only because `build_exporter` does).
-/// Getting this wrong means editing an existing component silently
-/// resolves to the wrong type's form.
-fn component_type_name(category: ComponentCategory, id: &str, value: &Value) -> String {
-    match category {
-        ComponentCategory::Receiver => sg_config::component_type(id).to_string(),
-        ComponentCategory::Exporter | ComponentCategory::Operator => value
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or_else(|| sg_config::component_type(id))
-            .to_string(),
+        ComponentCategory::Extension => TopTab::Extensions,
     }
 }
 
@@ -520,24 +667,38 @@ mod tests {
         KeyEvent::from(code)
     }
 
+    /// FILE_LOG_FIELDS order is include, exclude, start_at, poll_interval,
+    /// storage, operators -- `operators` is index 5, so 5 Tabs from a
+    /// freshly opened EditComponent (focused=0) land on it.
+    fn tab_to_operators_field(app: &mut App) {
+        for _ in 0..5 {
+            app.on_key(key(KeyCode::Tab));
+        }
+    }
+
     fn sample_doc() -> EditorDoc {
         EditorDoc::parse(
             r#"
 receivers:
-  filelog/app:
+  file_log/app:
     include: ["/var/log/app/*.log"]
-    checkpoint_file: "/tmp/app.checkpoint.json"
+    operators:
+      - type: add
+        field: attributes.sourcetype
+        value: myapp
 exporters:
-  sentinelone_hec:
-    type: s1hec
+  splunk_hec/sentinelone:
     endpoint: "https://example.invalid/services/collector/event"
     token: "tok"
-    sourcetype: "app_ts_parser"
+extensions:
+  file_storage:
+    directory: /var/lib/sgcia/otelcol-storage
 service:
+  extensions: [file_storage]
   pipelines:
     logs/app:
-      receivers: [filelog/app]
-      exporters: [sentinelone_hec]
+      receivers: [file_log/app]
+      exporters: [splunk_hec/sentinelone]
 "#,
         )
         .unwrap()
@@ -554,7 +715,9 @@ service:
     fn tab_cycles_through_top_tabs() {
         let mut app = App::new(PathBuf::from("x.yaml"), sample_doc());
         app.on_key(key(KeyCode::Tab));
-        assert!(matches!(app.screen, Screen::TopLevel { tab: TopTab::Operators, .. }));
+        assert!(matches!(app.screen, Screen::TopLevel { tab: TopTab::Exporters, .. }));
+        app.on_key(key(KeyCode::Tab));
+        assert!(matches!(app.screen, Screen::TopLevel { tab: TopTab::Extensions, .. }));
     }
 
     #[test]
@@ -570,7 +733,7 @@ service:
     #[test]
     fn editing_and_submitting_a_component_marks_doc_dirty() {
         let mut app = App::new(PathBuf::from("x.yaml"), sample_doc());
-        app.on_key(key(KeyCode::Enter)); // open filelog/app for edit
+        app.on_key(key(KeyCode::Enter)); // open file_log/app for edit, focused on `include`
         app.on_key(key(KeyCode::Enter)); // submit immediately (no field changes)
         assert!(app.dirty);
         assert!(matches!(app.screen, Screen::TopLevel { .. }));
@@ -582,27 +745,37 @@ service:
         app.on_key(key(KeyCode::Char('d')));
         match &app.screen {
             Screen::ConfirmRemove { id, blocking, .. } => {
-                assert_eq!(id, "filelog/app");
+                assert_eq!(id, "file_log/app");
                 assert_eq!(blocking, &vec!["logs/app".to_string()]);
             }
             _ => panic!("expected ConfirmRemove"),
         }
-        assert!(app.doc.receivers.contains_key("filelog/app"), "not removed yet");
+        assert!(app.doc.receivers.contains_key("file_log/app"), "not removed yet");
 
         app.on_key(key(KeyCode::Char('y')));
-        assert!(!app.doc.receivers.contains_key("filelog/app"));
+        assert!(!app.doc.receivers.contains_key("file_log/app"));
         assert!(
             !app.doc.pipelines["logs/app"]["receivers"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|v| v == "filelog/app"),
+                .any(|v| v == "file_log/app"),
             "dangling reference must be stripped from the pipeline too"
         );
     }
 
     #[test]
-    fn add_component_flow_creates_a_new_receiver() {
+    fn removing_an_extension_never_requires_confirmation() {
+        let mut app = App::new(PathBuf::from("x.yaml"), sample_doc());
+        app.on_key(key(KeyCode::Tab)); // Exporters
+        app.on_key(key(KeyCode::Tab)); // Extensions
+        app.on_key(key(KeyCode::Char('d')));
+        assert!(!app.doc.extensions.contains_key("file_storage"));
+        assert!(matches!(app.screen, Screen::TopLevel { tab: TopTab::Extensions, .. }));
+    }
+
+    #[test]
+    fn add_component_flow_creates_a_new_receiver_without_a_type_key() {
         let mut app = App::new(PathBuf::from("x.yaml"), sample_doc());
         app.on_key(key(KeyCode::Char('a')));
         assert!(matches!(app.screen, Screen::PickType { category: ComponentCategory::Receiver, .. }));
@@ -618,6 +791,72 @@ service:
         assert!(matches!(app.screen, Screen::EditComponent { .. }));
         app.on_key(key(KeyCode::Enter)); // submit form as-is (seeded defaults)
 
-        assert!(app.doc.receivers.contains_key("syslog/new"));
+        let value = app.doc.receivers.get("syslog/new").expect("receiver created");
+        assert!(value.get("type").is_none(), "OTel infers type from the id, not a type: key");
+    }
+
+    #[test]
+    fn entering_operator_list_field_opens_operator_list_screen() {
+        let mut app = App::new(PathBuf::from("x.yaml"), sample_doc());
+        app.on_key(key(KeyCode::Enter)); // open file_log/app for edit, focused on `include`
+        tab_to_operators_field(&mut app);
+        app.on_key(key(KeyCode::Enter)); // drill into the operator list
+        assert!(matches!(app.screen, Screen::OperatorList { .. }));
+    }
+
+    #[test]
+    fn operator_list_shows_the_existing_add_operator() {
+        let mut app = App::new(PathBuf::from("x.yaml"), sample_doc());
+        app.on_key(key(KeyCode::Enter));
+        tab_to_operators_field(&mut app);
+        app.on_key(key(KeyCode::Enter));
+        match &app.screen {
+            Screen::OperatorList { form, .. } => {
+                let ops = form.operators();
+                assert_eq!(ops.len(), 1);
+                assert_eq!(ops[0]["type"], "add");
+            }
+            _ => panic!("expected OperatorList"),
+        }
+    }
+
+    #[test]
+    fn adding_a_new_operator_persists_through_to_the_component() {
+        let mut app = App::new(PathBuf::from("x.yaml"), sample_doc());
+        app.on_key(key(KeyCode::Enter)); // EditComponent file_log/app
+        tab_to_operators_field(&mut app);
+        app.on_key(key(KeyCode::Enter)); // OperatorList
+        app.on_key(key(KeyCode::Char('a'))); // OperatorPickType
+        assert!(matches!(app.screen, Screen::OperatorPickType { .. }));
+
+        app.on_key(key(KeyCode::Down)); // move off `add` to `remove` (or wherever) -- just exercise navigation
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Enter)); // pick `add` -> OperatorEdit
+        assert!(matches!(app.screen, Screen::OperatorEdit { index: None, .. }));
+
+        app.on_key(key(KeyCode::Enter)); // submit op form as-is (seeded defaults) -> back to OperatorList
+        match &app.screen {
+            Screen::OperatorList { form, .. } => assert_eq!(form.operators().len(), 2),
+            _ => panic!("expected OperatorList"),
+        }
+
+        app.on_key(key(KeyCode::Esc)); // back to EditComponent, focus advanced off `operators`
+        app.on_key(key(KeyCode::Enter)); // submit the whole component form
+
+        let value = app.doc.receivers.get("file_log/app").unwrap();
+        assert_eq!(value["operators"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn removing_an_operator_from_the_list() {
+        let mut app = App::new(PathBuf::from("x.yaml"), sample_doc());
+        app.on_key(key(KeyCode::Enter));
+        tab_to_operators_field(&mut app);
+        app.on_key(key(KeyCode::Enter)); // OperatorList with 1 item
+        app.on_key(key(KeyCode::Char('d')));
+        match &app.screen {
+            Screen::OperatorList { form, .. } => assert!(form.operators().is_empty()),
+            _ => panic!("expected OperatorList"),
+        }
     }
 }

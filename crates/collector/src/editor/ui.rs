@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-const PIPELINE_DESCRIPTION: &str = "A pipeline wires everything together: events come in from the listed receivers, flow through the listed operators in order, then get sent out to the listed exporters.";
+const PIPELINE_DESCRIPTION: &str = "A pipeline wires everything together: events come in from the listed receivers and get sent out to the listed exporters. Per-receiver parsing is configured on each receiver itself (its operators field), not here.";
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -36,6 +36,14 @@ pub fn draw(frame: &mut Frame, app: &App) {
             draw_form(frame, chunks[0], &format!("editing pipeline {id}"), PIPELINE_DESCRIPTION, form)
         }
         Screen::ConfirmRemove { id, blocking, .. } => draw_confirm_remove(frame, chunks[0], id, blocking),
+        Screen::OperatorList { id, form, selected, .. } => {
+            draw_operator_list(frame, chunks[0], id, form, *selected)
+        }
+        Screen::OperatorPickType { selected, .. } => draw_operator_pick_type(frame, chunks[0], *selected),
+        Screen::OperatorEdit { id, op_form, .. } => {
+            let description = op_form.type_name.map(describe_operator_type).unwrap_or("");
+            draw_form(frame, chunks[0], &format!("editing operator on {id}"), description, op_form)
+        }
     }
 
     draw_status_bar(frame, chunks[1], app);
@@ -49,13 +57,17 @@ fn describe_type(category: ComponentCategory, type_name: &str) -> &'static str {
         .unwrap_or("")
 }
 
+fn describe_operator_type(type_name: &str) -> &'static str {
+    schema_registry::operator_type(type_name).map(|s| s.description).unwrap_or("")
+}
+
 fn draw_top_level(frame: &mut Frame, area: Rect, app: &App, tab: TopTab, selected: usize) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(1)])
         .split(area);
 
-    let tabs = [TopTab::Receivers, TopTab::Operators, TopTab::Exporters, TopTab::Pipelines];
+    let tabs = [TopTab::Receivers, TopTab::Exporters, TopTab::Extensions, TopTab::Pipelines];
     let tab_line = Line::from(
         tabs.iter()
             .map(|t| {
@@ -100,8 +112,8 @@ fn draw_top_level(frame: &mut Frame, area: Rect, app: &App, tab: TopTab, selecte
 fn ids_for_display(app: &App, tab: TopTab) -> Vec<String> {
     let mut ids: Vec<String> = match tab {
         TopTab::Receivers => app.doc.receivers.keys().cloned().collect(),
-        TopTab::Operators => app.doc.operators.keys().cloned().collect(),
         TopTab::Exporters => app.doc.exporters.keys().cloned().collect(),
+        TopTab::Extensions => app.doc.extensions.keys().cloned().collect(),
         TopTab::Pipelines => app.doc.pipelines.keys().cloned().collect(),
     };
     ids.sort();
@@ -109,13 +121,36 @@ fn ids_for_display(app: &App, tab: TopTab) -> Vec<String> {
 }
 
 fn draw_pick_type(frame: &mut Frame, area: Rect, category: ComponentCategory, selected: usize) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("pick a type (Up/Down to move, Enter to confirm, Esc to cancel)");
+    draw_type_list(
+        frame,
+        area,
+        "pick a type (Up/Down to move, Enter to confirm, Esc to cancel)",
+        schema_registry::types_for(category),
+        selected,
+    );
+}
+
+fn draw_operator_pick_type(frame: &mut Frame, area: Rect, selected: usize) {
+    draw_type_list(
+        frame,
+        area,
+        "pick an operator type (Up/Down to move, Enter to confirm, Esc to cancel)",
+        schema_registry::operator_types(),
+        selected,
+    );
+}
+
+fn draw_type_list(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    types: &[schema_registry::ComponentTypeSpec],
+    selected: usize,
+) {
+    let block = Block::default().borders(Borders::ALL).title(title.to_string());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let types = schema_registry::types_for(category);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(types.len().max(1) as u16), Constraint::Min(2)])
@@ -169,7 +204,7 @@ fn draw_form(frame: &mut Frame, area: Rect, title: &str, description: &str, form
     // otherwise the field text gets drawn under the border and its
     // leftmost character(s) get clipped by it.
     let block = Block::default().borders(Borders::ALL).title(format!(
-        "{title} -- Tab: next field  Left/Right: cycle choice  Enter: save  Esc: cancel"
+        "{title} -- Tab: next field  Left/Right: cycle choice  Enter: save (or manage operators)  Esc: cancel"
     ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -201,10 +236,12 @@ fn draw_form(frame: &mut Frame, area: Rect, title: &str, description: &str, form
 
     for (i, (spec, state)) in form.fields_spec.iter().zip(&form.fields).enumerate() {
         let value_text = match state {
-            FieldEditState::Text(input) | FieldEditState::StringList(input) | FieldEditState::RawJson(input) => {
-                input.value().to_string()
-            }
+            FieldEditState::Text(input) | FieldEditState::StringList(input) => input.value().to_string(),
+            FieldEditState::Bool(checked) => checked.to_string(),
             FieldEditState::Enum { options, selected } => options[*selected].to_string(),
+            FieldEditState::OperatorList(ops) => {
+                format!("{} operator(s) -- press Enter to manage", ops.len())
+            }
         };
         let focused = i == form.focused;
         let style = if focused {
@@ -213,7 +250,7 @@ fn draw_form(frame: &mut Frame, area: Rect, title: &str, description: &str, form
             Style::default()
         };
         let line = Line::from(vec![
-            Span::styled(format!("{:<20}", spec.key), style),
+            Span::styled(format!("{:<32}", spec.key), style),
             Span::raw(value_text),
         ]);
         if let Some(row) = field_rows.get(i) {
@@ -228,6 +265,33 @@ fn draw_form(frame: &mut Frame, area: Rect, title: &str, description: &str, form
             .wrap(Wrap { trim: true }),
         chunks[3],
     );
+}
+
+fn draw_operator_list(frame: &mut Frame, area: Rect, receiver_id: &str, form: &FormState, selected: usize) {
+    let block = Block::default().borders(Borders::ALL).title(format!(
+        "operators on {receiver_id} -- a: add  Enter: edit  d: remove  Esc: back"
+    ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let ops = form.operators();
+    let items: Vec<ListItem> = if ops.is_empty() {
+        vec![ListItem::new("(none -- press 'a' to add one)")]
+    } else {
+        ops.iter()
+            .enumerate()
+            .map(|(i, op)| {
+                let type_name = op.get("type").and_then(|v| v.as_str()).unwrap_or("?");
+                let style = if i == selected {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(format!("{i}: {type_name}")).style(style)
+            })
+            .collect()
+    };
+    frame.render_widget(List::new(items), inner);
 }
 
 fn draw_confirm_remove(frame: &mut Frame, area: Rect, id: &str, blocking: &[String]) {
@@ -262,7 +326,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn render_to_string(app: &App) -> String {
-        let backend = TestBackend::new(100, 30);
+        let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| draw(f, app)).unwrap();
         terminal
@@ -286,9 +350,8 @@ mod tests {
         let doc = EditorDoc::parse(
             r#"
 receivers:
-  filelog/app:
+  file_log/app:
     include: ["/var/log/app/*.log"]
-    checkpoint_file: "/tmp/app.checkpoint.json"
 service:
   pipelines: {}
 "#,
@@ -296,7 +359,27 @@ service:
         .unwrap();
         let app = App::new(PathBuf::from("x.yaml"), doc);
         let content = render_to_string(&app);
-        assert!(content.contains("filelog/app"));
+        assert!(content.contains("file_log/app"));
+    }
+
+    #[test]
+    fn extensions_tab_is_reachable_and_lists_extensions() {
+        let doc = EditorDoc::parse(
+            r#"
+extensions:
+  file_storage:
+    directory: /var/lib/sgcia/otelcol-storage
+service:
+  pipelines: {}
+"#,
+        )
+        .unwrap();
+        let mut app = App::new(PathBuf::from("x.yaml"), doc);
+        app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Tab));
+        app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Tab));
+        let content = render_to_string(&app);
+        assert!(content.contains("Extensions"));
+        assert!(content.contains("file_storage"));
     }
 
     #[test]
@@ -312,9 +395,8 @@ service:
         let doc = EditorDoc::parse(
             r#"
 receivers:
-  filelog/app:
+  file_log/app:
     include: ["/var/log/app/*.log"]
-    checkpoint_file: "/tmp/app.checkpoint.json"
 service:
   pipelines: {}
 "#,
@@ -328,10 +410,8 @@ service:
         // the same raw area as the field text (not its inset `inner()`
         // rect), clipping the leftmost character of every field label.
         assert!(content.contains("include"), "field label must not be clipped");
-        assert!(content.contains("checkpoint_file"));
-        // Help text for whichever field starts focused should be visible
-        // somewhere on screen.
-        assert!(content.contains("glob patterns") || content.contains("checkpoint"));
+        assert!(content.contains("poll_interval"));
+        assert!(content.contains("glob patterns"));
     }
 
     #[test]
@@ -342,5 +422,33 @@ service:
         let content = render_to_string(&app);
         assert!(content.contains("syslog"));
         assert!(content.contains("Listens for syslog messages"));
+    }
+
+    #[test]
+    fn operator_list_screen_shows_existing_operators_by_type() {
+        let doc = EditorDoc::parse(
+            r#"
+receivers:
+  file_log/app:
+    include: ["/var/log/app/*.log"]
+    operators:
+      - type: add
+        field: attributes.sourcetype
+        value: myapp
+service:
+  pipelines: {}
+"#,
+        )
+        .unwrap();
+        let mut app = App::new(PathBuf::from("x.yaml"), doc);
+        app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter));
+        // Tab to the operators field (include -> exclude -> start_at ->
+        // poll_interval -> storage -> operators) then drill in.
+        for _ in 0..5 {
+            app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Tab));
+        }
+        app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter));
+        let content = render_to_string(&app);
+        assert!(content.contains("0: add"));
     }
 }

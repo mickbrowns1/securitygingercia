@@ -1,6 +1,6 @@
 //! Interactive config editor TUI: load/browse/edit/save a YAML config
 //! file offline (no running collector process involved -- applying
-//! changes means restarting `sgcia run` afterward).
+//! changes means restarting `sgcia-otelcol` afterward).
 
 mod app;
 mod model;

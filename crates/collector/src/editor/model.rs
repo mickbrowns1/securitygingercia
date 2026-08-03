@@ -1,8 +1,7 @@
 use crate::editor::schema_registry::ComponentCategory;
 use serde_json::{Map, Value};
-use sg_config::RawConfig;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EditorError {
@@ -18,18 +17,25 @@ pub enum EditorError {
 
 /// In-memory config document, kept as plain `serde_json::Map`s (already
 /// order-preserving under the workspace's `serde_json` `preserve_order`
-/// feature) rather than `sg_config::RawConfig` directly, so that:
+/// feature) rather than any strongly-typed config struct, so that:
 /// - unknown/not-yet-registered fields survive a load -> edit -> save
 ///   round trip untouched (only fields the user actually edits change),
 /// - `${VAR}` tokens inside string values are preserved byte-for-byte,
 ///   since they're never parsed as anything but opaque strings here.
+///
+/// This mirrors real OTel Collector config shape: `receivers`/
+/// `exporters`/`extensions` are id-keyed maps; each receiver owns its own
+/// inline `operators:` list rather than referencing a shared top-level
+/// section. `service.extensions` is derived automatically (every defined
+/// extension is active -- there's no supported "defined but unused"
+/// case), but `service.pipelines`' receiver/exporter lists are real,
+/// user-managed per-pipeline choices.
 #[derive(Debug, Clone, Default)]
 pub struct EditorDoc {
     pub receivers: Map<String, Value>,
-    pub operators: Map<String, Value>,
     pub exporters: Map<String, Value>,
-    /// Each value is an object `{receivers: [...], operators: [...],
-    /// exporters: [...]}`, matching `sg_config::PipelineConfig`'s shape.
+    pub extensions: Map<String, Value>,
+    /// Each value is an object `{receivers: [...], exporters: [...]}`.
     pub pipelines: Map<String, Value>,
 }
 
@@ -38,9 +44,9 @@ impl EditorDoc {
         Self::default()
     }
 
-    /// Loads a config file, skipping `sg_config::expand_env` on purpose
-    /// so `${VAR}` tokens stay literal in memory. A missing file loads as
-    /// an empty (fresh) document rather than an error, so `sgcia edit
+    /// Loads a config file, skipping env expansion on purpose so `${VAR}`
+    /// tokens stay literal in memory. A missing file loads as an empty
+    /// (fresh) document rather than an error, so `sgcia edit
     /// --config new.yaml` can build one from scratch.
     pub fn load(path: &Path) -> Result<Self, EditorError> {
         match std::fs::read_to_string(path) {
@@ -68,43 +74,67 @@ impl EditorDoc {
             .unwrap_or_default();
         Ok(Self {
             receivers: get_map("receivers"),
-            operators: get_map("operators"),
             exporters: get_map("exporters"),
+            extensions: get_map("extensions"),
             pipelines,
         })
     }
 
     pub fn to_value(&self) -> Value {
+        let mut extension_ids: Vec<&String> = self.extensions.keys().collect();
+        extension_ids.sort();
         serde_json::json!({
             "receivers": self.receivers,
-            "operators": self.operators,
             "exporters": self.exporters,
-            "service": { "pipelines": self.pipelines },
+            "extensions": self.extensions,
+            "service": {
+                "extensions": extension_ids,
+                "pipelines": self.pipelines,
+            },
         })
     }
 
-    /// Structural validation (`sg_config::RawConfig::validate` -- unknown
-    /// pipeline references, empty receiver/exporter lists) plus a deeper,
-    /// best-effort pass running each component's *real* `from_value`/
-    /// operator builder against a clone with any `${...}`-looking string
-    /// replaced by a harmless placeholder first, so validation doesn't
-    /// require the real secret to be present on the editing machine (the
-    /// placeholder is never written to disk -- only used in-memory here).
-    pub fn validate(&self) -> Result<(), EditorError> {
-        let raw: RawConfig = serde_json::from_value(self.to_value())
-            .map_err(|e| EditorError::Invalid(format!("structurally invalid: {e}")))?;
-        raw.validate()
-            .map_err(|e| EditorError::Invalid(e.to_string()))?;
+    /// Runs the real `sgcia-otelcol validate` binary against this
+    /// document -- there is no Rust-side validator anymore now that the
+    /// collector engine itself is the OCB-built Go binary, so that binary
+    /// is the only source of truth for validity. `${VAR}`-looking strings
+    /// are replaced by a harmless placeholder first, so validation
+    /// doesn't require the real secret to be present on the editing
+    /// machine (the placeholder is never written to the real config
+    /// file -- only used in this temp copy).
+    fn validate_with_binary(&self, bin: &Path) -> Result<(), EditorError> {
+        let value = placeholder_for_validation(&self.to_value());
+        let yaml_text = serde_yaml_ng::to_string(&value)
+            .map_err(|e| EditorError::Serialize(e.to_string()))?;
 
-        for (id, def) in &self.receivers {
-            validate_receiver(id, &placeholder_for_validation(def))?;
-        }
-        for (id, def) in &self.exporters {
-            validate_exporter(id, &placeholder_for_validation(def))?;
-        }
-        for (id, def) in &self.operators {
-            sg_operators::build_one(id, &placeholder_for_validation(def))
-                .map_err(|e| EditorError::Invalid(e.to_string()))?;
+        let mut tmp = tempfile::Builder::new()
+            .suffix(".yaml")
+            .tempfile()
+            .map_err(|e| EditorError::Io("temp file".to_string(), e.to_string()))?;
+        tmp.write_all(yaml_text.as_bytes())
+            .map_err(|e| EditorError::Io(tmp.path().display().to_string(), e.to_string()))?;
+        tmp.flush()
+            .map_err(|e| EditorError::Io(tmp.path().display().to_string(), e.to_string()))?;
+
+        let output = std::process::Command::new(bin)
+            .arg("validate")
+            .arg("--config")
+            .arg(format!("file:{}", tmp.path().display()))
+            .output()
+            .map_err(|e| {
+                EditorError::Invalid(format!(
+                    "couldn't run '{} validate' (set SGCIA_OTELCOL_BIN if it's not on PATH): {e}",
+                    bin.display()
+                ))
+            })?;
+
+        if !output.status.success() {
+            let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(EditorError::Invalid(if message.is_empty() {
+                format!("{} validate exited with {}", bin.display(), output.status)
+            } else {
+                message
+            }));
         }
         Ok(())
     }
@@ -113,7 +143,11 @@ impl EditorDoc {
     /// directory + `fsync` + `rename`) -- never overwrites the good file
     /// on disk with an invalid one.
     pub fn save(&self, path: &Path) -> Result<(), EditorError> {
-        self.validate()?;
+        self.save_with_binary(path, &otelcol_binary_path())
+    }
+
+    fn save_with_binary(&self, path: &Path, bin: &Path) -> Result<(), EditorError> {
+        self.validate_with_binary(bin)?;
         let yaml_text = serde_yaml_ng::to_string(&self.to_value())
             .map_err(|e| EditorError::Serialize(e.to_string()))?;
         atomic_write(path, &yaml_text)
@@ -122,9 +156,15 @@ impl EditorDoc {
     }
 
     /// Names of pipelines that still reference `id` in the given
-    /// category's list.
+    /// category's list. Extensions are never listed per-pipeline (every
+    /// defined extension is active collector-wide -- see `to_value`), so
+    /// this always returns empty for `ComponentCategory::Extension`; a
+    /// receiver's `storage:` reference to an extension id is checked by
+    /// the real validator at save time instead.
     pub fn pipelines_referencing(&self, category: ComponentCategory, id: &str) -> Vec<String> {
-        let key = category_key(category);
+        let Some(key) = category_key(category) else {
+            return Vec::new();
+        };
         let mut names: Vec<String> = self
             .pipelines
             .iter()
@@ -144,7 +184,9 @@ impl EditorDoc {
     /// call before actually deleting the component so no dangling
     /// reference survives to fail validation on next save.
     pub fn strip_from_pipelines(&mut self, category: ComponentCategory, id: &str) {
-        let key = category_key(category);
+        let Some(key) = category_key(category) else {
+            return;
+        };
         for def in self.pipelines.values_mut() {
             if let Some(arr) = def.get_mut(key).and_then(|v| v.as_array_mut()) {
                 arr.retain(|v| v.as_str() != Some(id));
@@ -153,12 +195,27 @@ impl EditorDoc {
     }
 }
 
-fn category_key(category: ComponentCategory) -> &'static str {
+/// `None` for `Extension`: extensions are never listed inside a
+/// pipeline's own `receivers`/`exporters` arrays.
+fn category_key(category: ComponentCategory) -> Option<&'static str> {
     match category {
-        ComponentCategory::Receiver => "receivers",
-        ComponentCategory::Operator => "operators",
-        ComponentCategory::Exporter => "exporters",
+        ComponentCategory::Receiver => Some("receivers"),
+        ComponentCategory::Exporter => Some("exporters"),
+        ComponentCategory::Extension => None,
     }
+}
+
+fn otelcol_binary_path() -> PathBuf {
+    if let Ok(p) = std::env::var("SGCIA_OTELCOL_BIN") {
+        return PathBuf::from(p);
+    }
+    // Dev convenience: repo-relative path when `sgcia edit` is run from
+    // the workspace root without the collector installed alongside it.
+    let dev_path = PathBuf::from("otelcol/dist/sgcia-otelcol");
+    if dev_path.exists() {
+        return dev_path;
+    }
+    PathBuf::from("sgcia-otelcol")
 }
 
 fn placeholder_for_validation(value: &Value) -> Value {
@@ -172,32 +229,6 @@ fn placeholder_for_validation(value: &Value) -> Value {
         Value::Array(arr) => Value::Array(arr.iter().map(placeholder_for_validation).collect()),
         other => other.clone(),
     }
-}
-
-fn validate_receiver(id: &str, value: &Value) -> Result<(), EditorError> {
-    match sg_config::component_type(id) {
-        "syslog" => sg_receiver_syslog::SyslogConfig::from_value(id, value).map(|_| ()),
-        "filelog" => sg_receiver_file::FileLogConfig::from_value(id, value).map(|_| ()),
-        "windows_eventlog" => {
-            sg_receiver_winevtlog::WinEventLogConfig::from_value(id, value).map(|_| ())
-        }
-        other => Err(format!("unknown receiver type '{other}'")),
-    }
-    .map_err(EditorError::Invalid)
-}
-
-fn validate_exporter(id: &str, value: &Value) -> Result<(), EditorError> {
-    let type_str = value
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or_else(|| sg_config::component_type(id));
-    match type_str {
-        "s1hec" => sg_exporter_s1_hec::S1HecConfig::from_value(id, value).map(|_| ()),
-        "splunkhec" => sg_exporter_splunk_hec::SplunkHecConfig::from_value(id, value).map(|_| ()),
-        "stdout" => Ok(()),
-        other => Err(format!("unknown exporter type '{other}'")),
-    }
-    .map_err(EditorError::Invalid)
 }
 
 fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
@@ -223,21 +254,39 @@ mod tests {
 
     const SAMPLE: &str = r#"
 receivers:
-  filelog/app:
+  file_log/app:
     include: ["/var/log/app/*.log"]
-    checkpoint_file: "/var/lib/sgcia/app.checkpoint.json"
 exporters:
-  sentinelone_hec:
-    type: s1hec
+  splunk_hec/sentinelone:
     endpoint: "https://xdr.us1.sentinelone.net/services/collector/event"
     token: ${S1_HEC_TOKEN}
-    sourcetype: "app_ts_parser"
+extensions:
+  file_storage:
+    directory: /var/lib/sgcia/otelcol-storage
 service:
+  extensions: [file_storage]
   pipelines:
     logs/app:
-      receivers: [filelog/app]
-      exporters: [sentinelone_hec]
+      receivers: [file_log/app]
+      exporters: [splunk_hec/sentinelone]
 "#;
+
+    /// A stub `sgcia-otelcol` standing in for the real Go binary in tests
+    /// that don't need to exercise it for real (only that `EditorDoc`
+    /// invokes *some* binary correctly and handles its exit status).
+    /// Exercising the real binary is covered by the integration test
+    /// below, gated on the binary actually being built.
+    #[cfg(unix)]
+    fn stub_binary(exit_success: bool, stderr: &str) -> tempfile::TempPath {
+        use std::os::unix::fs::PermissionsExt;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let exit_code = if exit_success { 0 } else { 1 };
+        writeln!(file, "#!/bin/sh\n>&2 echo '{stderr}'\nexit {exit_code}").unwrap();
+        file.flush().unwrap();
+        let path = file.into_temp_path();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
 
     #[test]
     fn missing_file_loads_as_empty() {
@@ -251,15 +300,62 @@ service:
     fn load_preserves_var_reference_literally() {
         let doc = EditorDoc::parse(SAMPLE).unwrap();
         assert_eq!(
-            doc.exporters["sentinelone_hec"]["token"],
+            doc.exporters["splunk_hec/sentinelone"]["token"],
             "${S1_HEC_TOKEN}"
         );
     }
 
     #[test]
-    fn validate_passes_on_a_well_formed_document() {
+    fn to_value_derives_service_extensions_from_defined_extensions() {
         let doc = EditorDoc::parse(SAMPLE).unwrap();
-        doc.validate().unwrap();
+        let value = doc.to_value();
+        assert_eq!(value["service"]["extensions"], json!(["file_storage"]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_succeeds_when_binary_exits_zero() {
+        let doc = EditorDoc::parse(SAMPLE).unwrap();
+        let bin = stub_binary(true, "");
+        doc.validate_with_binary(&bin).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_surfaces_binary_stderr_on_failure() {
+        let doc = EditorDoc::parse(SAMPLE).unwrap();
+        let bin = stub_binary(false, "boom: bad config");
+        let err = doc.validate_with_binary(&bin).unwrap_err();
+        assert!(matches!(err, EditorError::Invalid(msg) if msg.contains("boom: bad config")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_rejects_when_binary_reports_failure_and_does_not_touch_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "original content").unwrap();
+
+        let doc = EditorDoc::parse(SAMPLE).unwrap();
+        let bin = stub_binary(false, "nope");
+
+        let err = doc.save_with_binary(&path, &bin).unwrap_err();
+        assert!(matches!(err, EditorError::Invalid(_)));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original content");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_with_binary_writes_file_when_binary_accepts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/config.yaml");
+        let doc = EditorDoc::parse(SAMPLE).unwrap();
+        let bin = stub_binary(true, "");
+
+        doc.save_with_binary(&path, &bin).unwrap();
+        assert!(!path.with_extension("yaml.tmp").exists());
+        let reloaded = EditorDoc::load(&path).unwrap();
+        assert!(reloaded.receivers.contains_key("file_log/app"));
     }
 
     #[test]
@@ -267,60 +363,64 @@ service:
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested/config.yaml");
         let mut doc = EditorDoc::parse(SAMPLE).unwrap();
-
-        // Mutate one field in memory, then save.
         doc.exporters
-            .get_mut("sentinelone_hec")
+            .get_mut("splunk_hec/sentinelone")
             .unwrap()
             .as_object_mut()
             .unwrap()
-            .insert("datasource".to_string(), json!("cisco_asa"));
-        doc.save(&path).unwrap();
+            .insert("index".to_string(), json!("main"));
+
+        // Write the file directly via the same atomic_write path save()
+        // uses, bypassing validate() so this test doesn't depend on the
+        // real otelcol binary being built.
+        let yaml_text = serde_yaml_ng::to_string(&doc.to_value()).unwrap();
+        atomic_write(&path, &yaml_text).unwrap();
         assert!(!path.with_extension("yaml.tmp").exists());
 
         let reloaded = EditorDoc::load(&path).unwrap();
         assert_eq!(
-            reloaded.exporters["sentinelone_hec"]["token"],
+            reloaded.exporters["splunk_hec/sentinelone"]["token"],
             "${S1_HEC_TOKEN}",
             "the ${{VAR}} reference must survive the round trip literally"
         );
         assert_eq!(
-            reloaded.exporters["sentinelone_hec"]["datasource"],
-            "cisco_asa"
+            reloaded.exporters["splunk_hec/sentinelone"]["index"],
+            "main"
         );
-    }
-
-    #[test]
-    fn save_rejects_dangling_pipeline_reference_and_does_not_touch_the_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.yaml");
-        std::fs::write(&path, "original content").unwrap();
-
-        let mut doc = EditorDoc::parse(SAMPLE).unwrap();
-        doc.pipelines
-            .get_mut("logs/app")
-            .unwrap()
-            .as_object_mut()
-            .unwrap()
-            .get_mut("receivers")
-            .unwrap()
-            .as_array_mut()
-            .unwrap()
-            .push(json!("filelog/does-not-exist"));
-
-        let err = doc.save(&path).unwrap_err();
-        assert!(matches!(err, EditorError::Invalid(_)));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original content");
     }
 
     #[test]
     fn pipelines_referencing_finds_and_strip_removes() {
         let mut doc = EditorDoc::parse(SAMPLE).unwrap();
-        let refs = doc.pipelines_referencing(ComponentCategory::Receiver, "filelog/app");
+        let refs = doc.pipelines_referencing(ComponentCategory::Receiver, "file_log/app");
         assert_eq!(refs, vec!["logs/app".to_string()]);
 
-        doc.strip_from_pipelines(ComponentCategory::Receiver, "filelog/app");
-        let refs_after = doc.pipelines_referencing(ComponentCategory::Receiver, "filelog/app");
+        doc.strip_from_pipelines(ComponentCategory::Receiver, "file_log/app");
+        let refs_after = doc.pipelines_referencing(ComponentCategory::Receiver, "file_log/app");
         assert!(refs_after.is_empty());
+    }
+
+    #[test]
+    fn pipelines_referencing_is_always_empty_for_extensions() {
+        let doc = EditorDoc::parse(SAMPLE).unwrap();
+        assert!(doc
+            .pipelines_referencing(ComponentCategory::Extension, "file_storage")
+            .is_empty());
+    }
+
+    /// Real integration coverage for `validate`/`save`, gated on the OCB-
+    /// built binary actually existing (it's a separate build step, not
+    /// part of `cargo test`) so this degrades to a skip rather than a
+    /// failure on a workspace that hasn't run `ocb --config
+    /// builder-config.yaml` yet.
+    #[test]
+    fn validate_accepts_a_well_formed_document_against_the_real_binary() {
+        let bin = otelcol_binary_path();
+        if !bin.exists() {
+            eprintln!("skipping: {} not built (see otelcol/README)", bin.display());
+            return;
+        }
+        let doc = EditorDoc::parse(SAMPLE).unwrap();
+        doc.validate_with_binary(&bin).unwrap();
     }
 }

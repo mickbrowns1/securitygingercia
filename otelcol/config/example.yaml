@@ -1,0 +1,170 @@
+# Example config for sgcia's OTel-based collector engine (otelcol/dist/sgcia-otelcol).
+#
+# Validate with:  ./dist/sgcia-otelcol validate --config file:config/example.yaml
+# Run with:       ./dist/sgcia-otelcol         --config file:config/example.yaml
+#
+# Secrets referenced as ${VAR} below (S1_HEC_TOKEN, SPLUNK_HEC_TOKEN) are read
+# from the environment at load time via the built-in env provider -- see
+# README.md for how to supply them.
+#
+# This mirrors the three pipelines in ../../configs/example.yaml (syslog,
+# file, Windows Event Log -> SentinelOne + Splunk HEC), translated to real
+# OTel Collector shape:
+#   - each receiver owns its own inline `operators:` list (stanza vocabulary)
+#     instead of a shared top-level `operators:` section.
+#   - checkpoint/bookmark persistence is a `storage:` extension reference
+#     (file_storage), not a per-receiver file path.
+#   - `sourcetype`/`datasource`/`msgid` are set as plain attributes via an
+#     `add` operator and deliberately left OUT of splunkhecexporter's
+#     `otel_attrs_to_hec_metadata` map, so they land in the HEC event's
+#     nested `fields{}` object rather than becoming top-level envelope keys
+#     -- this is what makes the stock exporter produce the same
+#     {time, host, event, fields} shape the Rust HEC exporters did.
+
+extensions:
+  file_storage:
+    directory: /var/lib/sgcia/otelcol-storage
+    create_directory: true
+
+  health_check:
+    endpoint: 127.0.0.1:13133
+
+  statuscfg:
+    # 127.0.0.1:7801 matches the Rust dashboard/editor's existing default
+    # --status-addr, so `sgcia dashboard` / `sgcia edit` work against this
+    # binary with no flags and no Rust code changes.
+    endpoint: 127.0.0.1:7801
+    config_path: ./config/example.yaml
+    metrics_url: http://127.0.0.1:8888/metrics
+
+receivers:
+  syslog/udp:
+    protocol: rfc3164
+    udp:
+      listen_address: "0.0.0.0:514"
+    operators:
+      - type: regex_parser
+        id: extract_asa_fields
+        parse_from: body
+        parse_to: attributes
+        regex: '^%ASA-(?P<severity>\d)-(?P<msgid>\d+):\s*(?P<message>.*)$'
+        on_error: send_quiet
+      - type: severity_parser
+        id: map_severity
+        parse_from: attributes.severity
+        preset: default
+        on_error: send_quiet
+      - type: add
+        id: add_datasource
+        field: attributes.datasource
+        value: "cisco_asa"
+      - type: add
+        id: add_sourcetype
+        field: attributes.sourcetype
+        value: "cisco_asa_ts_parser" # convention: <product>_ts_parser
+      - type: move
+        id: move_message_to_body
+        from: attributes.message
+        to: body
+
+  syslog/tcp:
+    protocol: rfc3164
+    tcp:
+      listen_address: "0.0.0.0:601"
+    enable_octet_counting: true # RFC 6587 octet counting (TCP only)
+    operators:
+      - type: regex_parser
+        id: extract_asa_fields
+        parse_from: body
+        parse_to: attributes
+        regex: '^%ASA-(?P<severity>\d)-(?P<msgid>\d+):\s*(?P<message>.*)$'
+        on_error: send_quiet
+      - type: severity_parser
+        id: map_severity
+        parse_from: attributes.severity
+        preset: default
+        on_error: send_quiet
+      - type: add
+        id: add_datasource
+        field: attributes.datasource
+        value: "cisco_asa"
+      - type: add
+        id: add_sourcetype
+        field: attributes.sourcetype
+        value: "cisco_asa_ts_parser"
+      - type: move
+        id: move_message_to_body
+        from: attributes.message
+        to: body
+
+  file_log/app:
+    include: ["/var/log/myapp/*.log"]
+    exclude: ["/var/log/myapp/*.gz"]
+    start_at: end # beginning | end
+    poll_interval: 500ms
+    storage: file_storage
+    operators:
+      - type: add
+        id: add_sourcetype
+        field: attributes.sourcetype
+        value: "myapp"
+
+  windows_event_log/security:
+    channel: Security
+    query: "*"
+    start_at: end
+    storage: file_storage
+    operators:
+      - type: add
+        id: add_sourcetype
+        field: attributes.sourcetype
+        value: "windows_security"
+
+exporters:
+  splunk_hec/sentinelone:
+    endpoint: "https://xdr.us1.sentinelone.net/services/collector/event"
+    token: ${S1_HEC_TOKEN}
+    # Leave source/sourcetype/index unmapped below -- since no attribute
+    # literally named com.splunk.source/sourcetype/index exists on our log
+    # records, those top-level HEC fields stay omitted, and the plain
+    # `sourcetype`/`datasource` attributes set by the `add` operators above
+    # fall through into the event's nested `fields{}` map instead.
+    otel_attrs_to_hec_metadata:
+      source: ""
+      sourcetype: ""
+      index: ""
+    sending_queue:
+      enabled: true
+      num_consumers: 10
+      queue_size: 1000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 500ms
+      max_interval: 30s
+
+  splunk_hec/splunk:
+    endpoint: "https://splunk.example.com:8088/services/collector/event"
+    token: ${SPLUNK_HEC_TOKEN}
+    index: main
+    otel_attrs_to_hec_metadata:
+      source: ""
+      sourcetype: ""
+    sending_queue:
+      enabled: true
+      num_consumers: 10
+      queue_size: 1000
+
+service:
+  extensions: [file_storage, health_check, statuscfg]
+  pipelines:
+    logs/syslog:
+      receivers: [syslog/udp, syslog/tcp]
+      exporters: [splunk_hec/sentinelone, splunk_hec/splunk]
+
+    logs/files:
+      receivers: [file_log/app]
+      exporters: [splunk_hec/sentinelone]
+
+    logs/windows:
+      receivers: [windows_event_log/security]
+      exporters: [splunk_hec/sentinelone]
