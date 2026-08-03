@@ -59,8 +59,7 @@ Then install a Rust toolchain, if you don't have one (this works the
 same way on every platform above):
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sudo sh -s -- -y
-source "$HOME/.cargo/env" || source "/root/.cargo/env"
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
 ```
 
@@ -199,7 +198,7 @@ Follow these steps in order.
    config, which a normal `chown`ed file still allows.
 
 You only need to do all five of these steps **once** per machine. After
-that, `sudo sgcia edit --config /etc/sgcia/config.yaml` (or any other `sgcia
+that, `sgcia edit --config /etc/sgcia/config.yaml` (or any other `sgcia
 ...` command) will just work, from any directory, in any new terminal
 window, forever -- no need to repeat these steps, use `sudo`, or
 remember where `target/release/sgcia` is.
@@ -221,7 +220,7 @@ remember where `target/release/sgcia` is.
   --version` again.
 - As a fallback that always works no matter what: you can skip
   installing entirely and just always type the full path instead,
-  e.g. `sudo ./target/release/sgcia edit --config /etc/sgcia/config.yaml`,
+  e.g. `./target/release/sgcia edit --config /etc/sgcia/config.yaml`,
   run from inside the `securitygingercia` folder.
 
 ## Configuring
@@ -234,35 +233,14 @@ and exporter type.
 
 Two ways to build your own:
 
-- **Interactively**: `sudo sgcia edit --config /etc/sgcia/config.yaml` -- see
+- **Interactively**: `sgcia edit --config /etc/sgcia/config.yaml` -- see
   [Using sgcia](#using-sgcia) below for the keybindings. Must be run from
   an actual interactive terminal (SSH session, local shell); it won't
   work piped through something non-interactive like a CI job.
 - **By hand**: copy `configs/example.yaml` and edit the YAML directly,
   then `sgcia check --config /etc/sgcia/config.yaml` to validate.
 
-
-### Setting Up Secrets & Environment Variables
-
-`sgcia` substitutes `${VAR_NAME}` placeholders in your `config.yaml` using process environment variables.
-
-#### Option A: Terminal Session
-Export the variables directly in your terminal session before launching `sgcia`:
-
-export S1_HEC_TOKEN="your-sentinelone-token"
-export SPLUNK_HEC_TOKEN="your-splunk-token"
-
-#### Option B: Systemd Environment File
-When running as a systemd service, `sgcia` reads environment variables from `/etc/sgcia/sgcia.env`:
-
-1. Copy the example environment file:
-   sudo cp packaging/systemd/sgcia.env.example /etc/sgcia/sgcia.env
-2. Edit the file to set your actual tokens:
-   sudo nano /etc/sgcia/sgcia.env
-3. Restrict permissions to protect secrets:
-   sudo chown sgcia:sgcia /etc/sgcia/sgcia.env
-   sudo chmod 600 /etc/sgcia/sgcia.env
-
+### Secrets
 
 HEC tokens are referenced in the config as `${VAR_NAME}` (e.g. `token:
 ${S1_HEC_TOKEN}`) and substituted from the process environment at load
@@ -368,7 +346,7 @@ on screen rather than blanking. Press `q` or `Esc` to quit.
 ### `sgcia edit` -- interactive config editor
 
 ```bash
-sudo sgcia edit --config /etc/sgcia/config.yaml
+sgcia edit --config /etc/sgcia/config.yaml
 ```
 
 Works entirely offline against the YAML file -- it never talks to a
@@ -481,7 +459,7 @@ script -- both are interactive terminal UIs):
 
 ```bash
 sgcia dashboard --status-addr 127.0.0.1:7801
-sudo sgcia edit --config /etc/sgcia/config.yaml   # then `sudo systemctl restart sgcia` to apply
+sgcia edit --config /etc/sgcia/config.yaml   # then `sudo systemctl restart sgcia` to apply
 ```
 
 ## The status API
