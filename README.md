@@ -37,12 +37,37 @@ run. Two binaries:
 
 ## Contents
 
+- [Deployment checklist](#deployment-checklist)
 - [Installing](#installing)
 - [Configuring](#configuring)
 - [Using sgcia](#using-sgcia)
 - [Running as a systemd service (Linux)](#running-as-a-systemd-service-linux)
+- [Verifying the deployment](#verifying-the-deployment)
+- [Upgrading](#upgrading)
+- [Uninstalling](#uninstalling)
 - [The status endpoint](#the-status-endpoint)
+- [Troubleshooting](#troubleshooting)
 - [Development](#development)
+
+## Deployment checklist
+
+Everything below in one ordered list, for a fresh production box. Each
+step links to the detailed section if you need it.
+
+1. [Get the code](#1-get-the-code) and [build both binaries](#2-build-sgcia-otelcol-the-collector-engine) (`sgcia-otelcol`, `sgcia`) -- on the target machine itself, not cross-compiled.
+2. [Install both binaries](#4-install-both-binaries) to `/usr/local/bin` and create `/etc/sgcia` + `/var/lib/sgcia`.
+3. [Write your config](#configuring) (`/etc/sgcia/config.yaml`), starting from [`otelcol/config/example.yaml`](otelcol/config/example.yaml) -- either by hand or with `sgcia edit`.
+4. [Supply secrets](#secrets) via `/etc/sgcia/sgcia.env` (HEC tokens, `chmod 600`).
+5. If you're listening on standard syslog ports (514/601): plan for [privileged ports](#privileged-ports) (the systemd unit already handles this) and open them in your [firewall](#firewall--network-access) if senders are on other hosts.
+6. `sgcia-otelcol validate --config file:/etc/sgcia/config.yaml` -- confirm the config is valid *before* wiring up the service.
+7. [Install and start the systemd service](#running-as-a-systemd-service-linux) (or run it directly in the foreground for a quick test).
+8. [Verify it's actually working](#verifying-the-deployment) -- service is active, `/status` responds, a real test event makes it through end to end.
+9. Point monitoring/alerting at [`GET /status`](#the-status-endpoint) if you want automated health checks beyond `systemctl status`.
+
+Not on Linux, or not using systemd? Steps 1-6 and 8 are platform-agnostic
+(see the [Windows](#windows) notes under Installing); you'll just run
+`sgcia-otelcol` under whatever process supervisor your platform uses
+instead of step 7's systemd unit.
 
 ## Installing
 
@@ -51,6 +76,24 @@ You're building two independent binaries here: `sgcia-otelcol` (Go) and
 
 ### 1. Get the code
 
+**Prerequisite: git.** A fresh server image often doesn't have it yet --
+check with `git --version` first; if that says "command not found":
+
+```bash
+# Debian / Ubuntu
+sudo apt update && sudo apt install -y git
+
+# Fedora / RHEL / CentOS
+sudo dnf install -y git
+
+# Arch
+sudo pacman -S --needed git
+
+# macOS (this also satisfies step 3's C-compiler prerequisite, since both
+# come from the same Xcode Command Line Tools install)
+xcode-select --install
+```
+
 ```bash
 git clone https://github.com/mickbrowns1/securitygingercia.git
 cd securitygingercia
@@ -58,12 +101,30 @@ cd securitygingercia
 
 ### 2. Build `sgcia-otelcol` (the collector engine)
 
-**Prerequisite: Go.** Install from
-[go.dev/doc/install](https://go.dev/doc/install) if you don't have it
-(`go version` to check). The OCB tool itself will pull a newer Go
-toolchain automatically via Go's own toolchain-management mechanism if
-your installed version is older than it needs -- you don't need to
-pre-empt that.
+**Prerequisite: Go.** Check with `go version` first; if that says
+`command not found`:
+
+```bash
+# Debian / Ubuntu
+sudo apt update && sudo apt install -y golang-go
+
+# Fedora / RHEL / CentOS
+sudo dnf install -y golang
+
+# Arch
+sudo pacman -S --needed go
+
+# macOS
+brew install go
+```
+
+Whatever version your package manager gives you (even if it looks old --
+Go 1.21+ is enough) is fine: the OCB tool itself will pull a newer Go
+toolchain automatically via Go's own toolchain-management mechanism the
+first time you run it below, if your installed version is older than it
+needs. If your distro's package is genuinely too old (pre-1.21) or
+unavailable, install directly from
+[go.dev/doc/install](https://go.dev/doc/install) instead.
 
 Install the builder tool once, then run it against this repo's manifest:
 
@@ -77,6 +138,23 @@ This downloads the pinned `opentelemetry-collector-contrib` receiver/
 exporter/extension versions from `builder-config.yaml`, generates a small
 `main.go`/`go.mod` under `otelcol/dist/`, and compiles the binary there:
 `otelcol/dist/sgcia-otelcol`.
+
+If this fails with `download go1.25 for linux/arm64: toolchain not
+available` (or a similar version, on a similar architecture): this is a
+real rough edge in Go's own automatic-toolchain-download feature, hit
+when your installed Go is *older* than what this build needs (common
+right after installing Go from your distro's package manager, which
+often lags -- see the [Go prerequisite](#2-build-sgcia-otelcol-the-collector-engine)
+above). The fix is to pin a specific, known-good toolchain version for
+just this command instead of letting it auto-resolve:
+
+```bash
+GOTOOLCHAIN=go1.25.12 "$(go env GOPATH)/bin/builder" --config builder-config.yaml
+```
+
+(Check [go.dev/dl](https://go.dev/dl/) if `go1.25.12` itself is no longer
+current by the time you read this -- any version satisfying this repo's
+`builder-config.yaml`/`go.mod` requirements works.)
 
 **Bumping a security patch later**: edit the `v0.x.0` version strings in
 `otelcol/builder-config.yaml` to the new contrib release, then re-run the
@@ -92,13 +170,13 @@ otherwise.
 
 ```bash
 # Debian / Ubuntu
-sudo apt update && sudo apt install -y build-essential git
+sudo apt update && sudo apt install -y build-essential
 
 # Fedora / RHEL / CentOS
 sudo dnf groupinstall -y "Development Tools"
 
 # Arch
-sudo pacman -S --needed base-devel git
+sudo pacman -S --needed base-devel
 
 # macOS (if `cc` isn't already present -- check with `xcode-select -p` first)
 xcode-select --install
@@ -124,7 +202,12 @@ cargo build --release
 
 If this is the first thing you're compiling on the machine and it fails
 with a linker error, go back to the prerequisite above -- that's what it
-means.
+means. If it instead fails with an *`undefined reference to 'main'`*
+linker error partway through (rather than immediately, and rather than
+the "linker `cc` not found" error above), that's a one-off flake --
+usually parallel compilation contending for CPU/memory on a small VM --
+not a real problem with your setup; just run `cargo build --release`
+again.
 
 The binary lands at `target/release/sgcia` (macOS/Linux) or
 `target\release\sgcia.exe` (Windows).
@@ -170,6 +253,60 @@ The `chown` makes both folders writable by you directly, so you can run
 running as a **systemd service** under its own dedicated user later (see
 below) only needs *read* access to the config, which a normal `chown`ed
 file still allows.
+
+### Windows
+
+The `windows_event_log` receiver only runs on Windows (it compiles
+elsewhere, but the collector refuses to start a pipeline using it on
+Linux/macOS) -- if you need that receiver, build and run `sgcia-otelcol`
+on an actual Windows host, not cross-compiled from Linux/macOS.
+
+In a PowerShell prompt, with [Git](https://git-scm.com/downloads/win),
+[Go](https://go.dev/doc/install), and the
+[Rust toolchain](https://rustup.rs) installed (all three ship native
+Windows installers -- no build-essential/xcode-select equivalent needed,
+MSVC's linker comes with the Rust installer's prompt to also install the
+Visual Studio Build Tools if you don't already have a C++ toolchain):
+
+```powershell
+git clone https://github.com/mickbrowns1/securitygingercia.git
+cd securitygingercia
+
+go install go.opentelemetry.io/collector/cmd/builder@latest
+cd otelcol
+& "$(go env GOPATH)\bin\builder.exe" --config builder-config.yaml
+cd ..
+
+cargo build --release
+```
+
+Binaries land at `otelcol\dist\sgcia-otelcol.exe` and
+`target\release\sgcia.exe`. Copy them somewhere on your `PATH` (e.g.
+`C:\Program Files\sgcia\`, added to the system `Path` environment
+variable via *System Properties → Environment Variables*), then create
+working directories:
+
+```powershell
+New-Item -ItemType Directory -Force -Path C:\ProgramData\sgcia
+New-Item -ItemType Directory -Force -Path C:\ProgramData\sgcia\storage
+```
+
+Point your config's `file_storage` extension's `directory` and
+`windows_event_log`'s `channel` at real values (e.g. `channel: Security`),
+then run the same way as Linux/macOS, just with `file:` paths using
+Windows separators:
+
+```powershell
+$env:S1_HEC_TOKEN = "your-token"
+sgcia-otelcol.exe --config "file:C:\ProgramData\sgcia\config.yaml"
+```
+
+There's no systemd equivalent bundled here -- for a real Windows
+deployment, wrap the above in a
+[Windows Service](https://learn.microsoft.com/en-us/windows/win32/services/services)
+(e.g. via [NSSM](https://nssm.cc/) or `sc.exe create`) so it starts on
+boot and restarts on failure, mirroring what the systemd unit does on
+Linux.
 
 ## Configuring
 
@@ -230,6 +367,32 @@ them as a non-root user needs an explicit capability grant. See
 or point `udp.listen_address`/`tcp.listen_address` at an unprivileged
 port (e.g. `0.0.0.0:5514`) and have your network/firewall layer
 forward/NAT 514 to it instead.
+
+### Firewall / network access
+
+Binding a port is not the same as being reachable from other hosts --
+if the log senders (routers, firewalls, other servers) are anywhere but
+`localhost`, open the port in the host firewall too, matching whatever
+you set as `listen_address` in your config:
+
+```bash
+# ufw (Debian/Ubuntu)
+sudo ufw allow 514/udp
+sudo ufw allow 601/tcp
+
+# firewalld (RHEL/Fedora/CentOS)
+sudo firewall-cmd --permanent --add-port=514/udp
+sudo firewall-cmd --permanent --add-port=601/tcp
+sudo firewall-cmd --reload
+```
+
+If the box is in a cloud VPC (AWS security group, Azure NSG, GCP
+firewall rule, etc.), that network-level allow-list is separate from and
+in addition to the host firewall -- both have to permit the traffic.
+Deliberately **don't** open the `statuscfg`/`health_check` extension
+ports (`7801`/`13133` by default) beyond loopback unless you have your
+own auth/network control in front of them -- see
+[The status endpoint](#the-status-endpoint).
 
 ## Using sgcia
 
@@ -399,6 +562,103 @@ sgcia dashboard --status-addr 127.0.0.1:7801
 sgcia edit --config /etc/sgcia/config.yaml   # then `sudo systemctl restart sgcia` to apply
 ```
 
+## Verifying the deployment
+
+Four checks, in order of how much they actually prove:
+
+1. **The service is up:**
+
+   ```bash
+   systemctl is-active sgcia   # should print "active"
+   journalctl -u sgcia -n 50 --no-pager   # no repeating errors
+   ```
+
+2. **The status endpoint responds** (proves the process is healthy, not
+   just "started"):
+
+   ```bash
+   curl -sf http://127.0.0.1:7801/status && echo OK
+   ```
+
+   `curl: (7) Failed to connect` here means either the process didn't
+   really start (recheck step 1) or your config's `statuscfg.endpoint`
+   isn't `127.0.0.1:7801`. You can't use `GET /config` to check that
+   remotely for the same reason you can't reach `/status` -- read the
+   config file directly on the box instead.
+
+3. **A real event makes it all the way through.** Send a test line from
+   an actual sender (or simulate one from the collector box itself) and
+   confirm the counters move. `logger` below is the util-linux version
+   (standard on Linux; macOS's built-in `logger` doesn't support
+   sending over the network) -- match `-P`/`-d` (UDP) or `-T` (TCP) to
+   whichever protocol/port your receiver actually listens on:
+
+   ```bash
+   # from the collector box, simulating a remote sender over the network
+   # (UDP, matching syslog/udp's default 0.0.0.0:514 in the example config):
+   logger -n 127.0.0.1 -P 514 -d "deployment verification test"
+   sleep 2
+   curl -s http://127.0.0.1:7801/status | jq '.receivers, .pipelines, .exporters'
+   ```
+
+   `receivers.<id>.events_in` and `pipelines.<name>.events_in` should
+   both have incremented by 1. If they haven't, the receiver isn't
+   reachable (check [Firewall / network access](#firewall--network-access)
+   and that you're testing the right protocol/port) or isn't matching
+   your `protocol`/framing settings.
+
+4. **It reaches the real destination.** Check `pipelines.<name>.events_out`
+   and `exporters.<id>.batches_sent` incremented too (not just
+   `events_in`), and `exporters.<id>.last_error` is `null`. If
+   `batches_failed` is climbing instead, the HEC endpoint/token is wrong --
+   check `journalctl -u sgcia` for the actual HTTP error, and confirm
+   `/etc/sgcia/sgcia.env` has the right token and the service was
+   restarted after you last edited it (`EnvironmentFile=` is only read at
+   process start).
+
+## Upgrading
+
+**The collector engine**, to pick up a security patch or new contrib
+release: edit the `v0.x.0` version strings in
+`otelcol/builder-config.yaml` to the new release (contrib and the
+builder tool itself release in lockstep, so match both to the same
+version), rebuild, and swap the binary in:
+
+```bash
+cd otelcol
+"$(go env GOPATH)/bin/builder" --config builder-config.yaml
+./dist/sgcia-otelcol validate --config file:/etc/sgcia/config.yaml   # against your real config, before touching the service
+sudo install -m 755 dist/sgcia-otelcol /usr/local/bin/sgcia-otelcol
+sudo systemctl restart sgcia
+journalctl -u sgcia -f   # watch it come back up cleanly
+```
+
+**The dashboard/editor**, after pulling new commits:
+
+```bash
+git pull
+cargo build --release
+sudo install -m 755 target/release/sgcia /usr/local/bin/sgcia
+```
+
+`sgcia` isn't managed by the systemd unit (only `sgcia-otelcol` runs as a
+service), so there's nothing to restart -- just re-run `sgcia dashboard`/
+`sgcia edit` next time you use them.
+
+## Uninstalling
+
+```bash
+sudo systemctl disable --now sgcia
+sudo rm /etc/systemd/system/sgcia.service
+sudo systemctl daemon-reload
+
+sudo rm /usr/local/bin/sgcia-otelcol /usr/local/bin/sgcia
+
+# Only if you don't want to keep the config/checkpoints for a future reinstall:
+sudo rm -rf /etc/sgcia /var/lib/sgcia
+sudo userdel sgcia
+```
+
 ## The status endpoint
 
 The `statuscfg` extension (a small local addition, not part of upstream
@@ -444,6 +704,80 @@ approximation derived from the collector's own record-count telemetry
 message" at the default telemetry level) -- see the comments in
 `otelcol/extensions/statuscfgextension/extension.go` for exactly what's
 approximated and why.
+
+## Troubleshooting
+
+- **`command not found` for `sgcia` or `sgcia-otelcol`.** Either the
+  binary wasn't actually built (recheck the build step's output for
+  errors) or your terminal cached its list of known commands before the
+  install -- open a **brand new terminal window** (or run `hash -r`) and
+  try again. As a fallback that always works: use the full path instead,
+  e.g. `./target/release/sgcia` or `./otelcol/dist/sgcia-otelcol`.
+
+- **`bind: address already in use`** on `514`/`601`/`7801`/`8888`/`13133`
+  (or whatever you set): something else on the box is already listening
+  on that port. `sudo lsof -i :514` (or the port in question) to see
+  what -- a leftover previous run of the collector that didn't shut down
+  cleanly, the system's own syslog daemon (`rsyslogd`/`syslog-ng`, common
+  on the standard 514/601), or an unrelated service (Docker Desktop/
+  OrbStack and similar tools are known to grab a wide range of local
+  ports). Either stop the conflicting process or pick a different port
+  in your config for whichever component collided.
+
+- **`listen ... permission denied`** on a port below 1024 (514, 601):
+  you're not running with `CAP_NET_BIND_SERVICE`/root. Under systemd,
+  confirm the unit's `AmbientCapabilities=CAP_NET_BIND_SERVICE` line
+  wasn't removed (see [systemd](#running-as-a-systemd-service-linux)).
+  Running by hand as a normal user for a quick test: either use `sudo`
+  (not recommended long-term) or point `listen_address` at an
+  unprivileged port instead (see [Privileged ports](#privileged-ports)).
+
+- **`statuscfg: listening on ...: address already in use` but only the
+  `statuscfg`/`health_check` extension fails, receivers start fine.**
+  Same root cause as the general port conflict above, just isolated to
+  that one extension -- change its `endpoint` field and, if you're using
+  `sgcia dashboard`, pass the matching `--status-addr`.
+
+- **`reading config_path "..." : no such file or directory`** from the
+  `statuscfg` extension at startup: its `config_path` field is a
+  *relative* path, resolved against the collector process's current
+  working directory at the moment it was started -- not relative to the
+  config file's own location. Either use an absolute path for
+  `config_path`, or always start `sgcia-otelcol` from the same directory
+  (the systemd unit's `WorkingDirectory=/var/lib/sgcia` handles this for
+  the service; if running by hand, `cd` there first or use an absolute
+  path).
+
+- **`directory must exist: ... no such file or directory`** from the
+  `file_storage` extension: add `create_directory: true` to it (see
+  [`otelcol/config/example.yaml`](otelcol/config/example.yaml)), or
+  create the directory yourself first.
+
+- **`download go1.25 for linux/arm64: toolchain not available`** while
+  building `sgcia-otelcol`: see the note under
+  [step 2](#2-build-sgcia-otelcol-the-collector-engine) -- pin a concrete
+  toolchain version with `GOTOOLCHAIN=go1.25.12` for that one command
+  rather than relying on Go's automatic resolution.
+
+- **`windows eventlog receiver is only supported on Windows`**: exactly
+  what it says -- a pipeline using `windows_event_log` will fail to
+  start the collector on Linux/macOS even though the binary builds fine
+  there. Either drop that pipeline from configs you run on non-Windows
+  hosts, or run this component specifically on a Windows host (see
+  [Windows](#windows)).
+
+- **`sgcia edit` says `couldn't run 'sgcia-otelcol validate'`** on save:
+  it shells out to the real `sgcia-otelcol` binary to validate (there's
+  no separate Rust-side validator) and couldn't find it. Either install
+  it on `PATH` (see [Installing](#installing)), or point at it directly
+  with `SGCIA_OTELCOL_BIN=/path/to/sgcia-otelcol sgcia edit --config ...`.
+
+- **`sgcia dashboard` shows a red "connection failed" banner**: it can't
+  reach the `statuscfg` extension's `endpoint`. Confirm `sgcia-otelcol`
+  is actually running (`systemctl status sgcia`), that its config's
+  `statuscfg.endpoint` matches the `--status-addr` you passed (both
+  default to `127.0.0.1:7801`), and that nothing else grabbed that port
+  first (see the port-conflict entries above).
 
 ## Development
 
