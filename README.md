@@ -119,11 +119,8 @@ brew install go
 ```
 
 Whatever version your package manager gives you (even if it looks old --
-Go 1.21+ is enough) is fine: the OCB tool itself will pull a newer Go
-toolchain automatically via Go's own toolchain-management mechanism the
-first time you run it below, if your installed version is older than it
-needs. If your distro's package is genuinely too old (pre-1.21) or
-unavailable, install directly from
+Go 1.21+ is enough) is fine to *start* with. If your distro's package is
+genuinely too old (pre-1.21) or unavailable, install directly from
 [go.dev/doc/install](https://go.dev/doc/install) instead.
 
 Install the builder tool once, then run it against this repo's manifest:
@@ -131,30 +128,24 @@ Install the builder tool once, then run it against this repo's manifest:
 ```bash
 go install go.opentelemetry.io/collector/cmd/builder@latest
 cd otelcol
-"$(go env GOPATH)/bin/builder" --config builder-config.yaml
+GOTOOLCHAIN=go1.25.12 "$(go env GOPATH)/bin/builder" --config builder-config.yaml
 ```
+
+The first line auto-upgrades itself to whatever newer Go toolchain it
+needs just fine. The `GOTOOLCHAIN=go1.25.12` pin on the second line
+works around a real rough edge in that *same* auto-upgrade feature, hit
+one step later: without it, the builder's own internal `go mod tidy`
+step fails outright with `download go1.25 for linux/arm64: toolchain not
+available` instead of resolving a working version on its own -- pinning
+one explicitly sidesteps that. (Check [go.dev/dl](https://go.dev/dl/) if
+`go1.25.12` itself is no longer current by the time you read this -- any
+version satisfying this repo's `builder-config.yaml`/`go.mod`
+requirements works.)
 
 This downloads the pinned `opentelemetry-collector-contrib` receiver/
 exporter/extension versions from `builder-config.yaml`, generates a small
 `main.go`/`go.mod` under `otelcol/dist/`, and compiles the binary there:
 `otelcol/dist/sgcia-otelcol`.
-
-If this fails with `download go1.25 for linux/arm64: toolchain not
-available` (or a similar version, on a similar architecture): this is a
-real rough edge in Go's own automatic-toolchain-download feature, hit
-when your installed Go is *older* than what this build needs (common
-right after installing Go from your distro's package manager, which
-often lags -- see the [Go prerequisite](#2-build-sgcia-otelcol-the-collector-engine)
-above). The fix is to pin a specific, known-good toolchain version for
-just this command instead of letting it auto-resolve:
-
-```bash
-GOTOOLCHAIN=go1.25.12 "$(go env GOPATH)/bin/builder" --config builder-config.yaml
-```
-
-(Check [go.dev/dl](https://go.dev/dl/) if `go1.25.12` itself is no longer
-current by the time you read this -- any version satisfying this repo's
-`builder-config.yaml`/`go.mod` requirements works.)
 
 **Bumping a security patch later**: edit the `v0.x.0` version strings in
 `otelcol/builder-config.yaml` to the new contrib release, then re-run the
@@ -193,10 +184,11 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
 ```
 
-Build, from the repo root (not `otelcol/` -- this is a separate Cargo
-workspace at the top level):
+Build, from the repo root -- not `otelcol/`, which step 2 left you inside
+of; this is a separate Cargo workspace at the top level:
 
 ```bash
+cd ..
 cargo build --release
 ```
 
@@ -274,6 +266,7 @@ cd securitygingercia
 
 go install go.opentelemetry.io/collector/cmd/builder@latest
 cd otelcol
+$env:GOTOOLCHAIN = "go1.25.12"   # works around a Go toolchain-resolution bug -- see step 2 in Installing
 & "$(go env GOPATH)\bin\builder.exe" --config builder-config.yaml
 cd ..
 
@@ -310,13 +303,102 @@ Linux.
 
 ## Configuring
 
-Config is a single YAML file in real OpenTelemetry Collector shape:
-top-level `receivers`, `exporters`, and `extensions` (each an id-keyed
-map), plus `service.pipelines` wiring named receivers/exporters together.
-[`otelcol/config/example.yaml`](otelcol/config/example.yaml) is a
-complete, documented reference covering every receiver, exporter, and
-extension type this distribution ships, including the inline `operators:`
-vocabulary.
+Config is a single YAML file in real OpenTelemetry Collector shape. This
+is the one thing to internalize before anything else here will make
+sense:
+
+```yaml
+receivers:        # id-keyed map -- one entry per input source
+  <type>/<name>:
+    ...fields for that type...
+    operators:    # optional inline parsing chain (all three receiver types support it)
+      - type: <operator-type>
+        ...fields for that operator...
+
+exporters:        # id-keyed map -- one entry per destination
+  <type>/<name>:
+    ...fields for that type...
+
+extensions:       # id-keyed map -- cross-cutting add-ons (storage, health, status)
+  <type>:
+    ...fields for that type...
+
+service:
+  extensions: [<extension-id>, ...]   # required to actually activate anything defined above -- see note below
+  pipelines:
+    <name>:
+      receivers: [<receiver-id>, ...]
+      exporters: [<exporter-id>, ...]
+```
+
+Every `<type>/<name>` id follows the OTel convention: the part before the
+first `/` selects which component type it is (e.g. `syslog`, `file_log`,
+`splunk_hec`) -- there's no separate `type:` field, the id *is* the type
+selector; the part after `/` is just a label you choose, used to tell two
+instances of the same type apart (e.g. a `syslog/udp` and a `syslog/tcp`
+receiver side by side) and to reference the component from
+`service.pipelines`.
+
+**`service.extensions` is easy to forget and the failure is confusing
+when you do**: defining something under `extensions:` only describes it;
+nothing actually *runs* until its id is also listed in
+`service.extensions`. A config missing that list still passes
+`sgcia-otelcol validate` (validate only checks each component's own
+fields, not whether it's wired in) but then fails at actual startup with
+something like `storage extension 'file_storage' not found` the moment a
+receiver tries to use it. If you're using `sgcia edit`, this is handled
+for you automatically -- it derives `service.extensions` from whatever
+you define under `extensions:` on every save, so you'll never see this.
+Writing YAML by hand, you have to list it yourself.
+
+A complete, minimal, runnable example -- tail one file, print events to
+the terminal, no secrets or network ports needed:
+
+```yaml
+# Save as e.g. /etc/sgcia/config.yaml, then:
+#   sgcia-otelcol validate --config file:/etc/sgcia/config.yaml
+#   sgcia-otelcol --config file:/etc/sgcia/config.yaml
+
+receivers:
+  file_log/app:
+    include: ["/var/log/myapp/*.log"]
+    start_at: end
+    operators:
+      - type: add
+        field: attributes.sourcetype
+        value: myapp
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    logs/app:
+      receivers: [file_log/app]
+      exporters: [debug]
+```
+
+### Available components
+
+| Category | Type | What it does | Key fields |
+|---|---|---|---|
+| Receiver | `syslog` | Listens for syslog over UDP and/or TCP | `protocol`, `udp.listen_address`/`tcp.listen_address`, `enable_octet_counting` |
+| Receiver | `file_log` | Tails files matching a glob, like `tail -f` | `include`, `exclude`, `start_at`, `storage` |
+| Receiver | `windows_event_log` | Reads a Windows Event Log channel (**Windows only** -- fails to start on Linux/macOS, see [Windows](#windows)) | `channel`, `query`, `start_at`, `storage` |
+| Exporter | `splunk_hec` | Sends to a Splunk-compatible HEC endpoint, including SentinelOne DataPipeline | `endpoint`, `token`, `otel_attrs_to_hec_metadata.*` |
+| Exporter | `debug` | Prints events to the terminal -- for testing a pipeline before wiring up a real destination | `verbosity` |
+| Extension | `file_storage` | Persists a receiver's read position across restarts (referenced by a receiver's `storage` field) | `directory`, `create_directory` |
+| Extension | `health_check` | Simple HTTP health-check endpoint for this collector process | `endpoint` |
+| Extension | `statuscfg` | Serves `/status` + `/config` for `sgcia dashboard`/`sgcia edit` to poll | `endpoint`, `config_path`, `metrics_url` |
+
+Every receiver's optional `operators:` list draws from the same
+`pkg/stanza` vocabulary: `regex_parser`, `json_parser`,
+`key_value_parser`, `severity_parser`, `time_parser` (parsers), and
+`add`/`remove`/`copy`/`move` (field manipulation) -- see
+[`otelcol/config/example.yaml`](otelcol/config/example.yaml) for a
+complete, real example of each, including a full syslog pipeline with
+regex extraction and severity mapping feeding two HEC exporters.
 
 Two ways to build your own:
 
@@ -324,9 +406,10 @@ Two ways to build your own:
   [Using sgcia](#using-sgcia) below for the keybindings. Must be run from
   an actual interactive terminal (SSH session, local shell); it won't
   work piped through something non-interactive like a CI job.
-- **By hand**: copy `otelcol/config/example.yaml` and edit the YAML
-  directly, then `sgcia-otelcol validate --config file:/etc/sgcia/config.yaml`
-  to check it.
+- **By hand**: start from the minimal example above or copy
+  `otelcol/config/example.yaml`, edit the YAML directly, then
+  `sgcia-otelcol validate --config file:/etc/sgcia/config.yaml` to check
+  it.
 
 ### Secrets
 
@@ -626,16 +709,19 @@ version), rebuild, and swap the binary in:
 
 ```bash
 cd otelcol
-"$(go env GOPATH)/bin/builder" --config builder-config.yaml
+GOTOOLCHAIN=go1.25.12 "$(go env GOPATH)/bin/builder" --config builder-config.yaml
 ./dist/sgcia-otelcol validate --config file:/etc/sgcia/config.yaml   # against your real config, before touching the service
 sudo install -m 755 dist/sgcia-otelcol /usr/local/bin/sgcia-otelcol
 sudo systemctl restart sgcia
 journalctl -u sgcia -f   # watch it come back up cleanly
 ```
 
-**The dashboard/editor**, after pulling new commits:
+**The dashboard/editor**, after pulling new commits (from the repo root
+-- `cd ..` first if you just did the collector-engine upgrade above,
+which leaves you inside `otelcol/`):
 
 ```bash
+cd ..
 git pull
 cargo build --release
 sudo install -m 755 target/release/sgcia /usr/local/bin/sgcia
@@ -753,6 +839,15 @@ approximated and why.
   [`otelcol/config/example.yaml`](otelcol/config/example.yaml)), or
   create the directory yourself first.
 
+- **`storage extension 'file_storage' not found`** (or similar, naming
+  whichever extension) at startup, even though it's right there under
+  `extensions:` in your config: it's defined but not *activated* -- add
+  its id to `service.extensions` (see the note in
+  [Configuring](#configuring)). This passes `sgcia-otelcol validate`
+  fine (validate doesn't check that extensions are wired in, only that
+  each one's own fields are well-formed) and only fails at real startup,
+  which is what makes it confusing.
+
 - **`download go1.25 for linux/arm64: toolchain not available`** while
   building `sgcia-otelcol`: see the note under
   [step 2](#2-build-sgcia-otelcol-the-collector-engine) -- pin a concrete
@@ -790,13 +885,15 @@ is its own Go module, independent of the generated `dist/` module):
 (cd otelcol/extensions/statuscfgextension && go test ./...)
 
 cd otelcol
-"$(go env GOPATH)/bin/builder" --config builder-config.yaml
+GOTOOLCHAIN=go1.25.12 "$(go env GOPATH)/bin/builder" --config builder-config.yaml
 ./dist/sgcia-otelcol validate --config file:config/example.yaml
 ```
 
-**The dashboard/editor** (repo root, Rust):
+**The dashboard/editor** (repo root -- `cd ..` first if you just ran the
+Go commands above, which leave you inside `otelcol/`):
 
 ```bash
+cd ..
 cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets
