@@ -59,10 +59,16 @@ Then install a Rust toolchain, if you don't have one (this works the
 same way on every platform above):
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sudo sh -s -- -y
-source "$HOME/.cargo/env" || source "/root/.cargo/env"
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
 ```
+
+Run this as your normal user, **not** with `sudo`. `sudo sh ...` here
+would install Rust for the `root` account instead of yours (into
+`/root/.cargo`, a directory your own user can't even read), while every
+later step in this guide (`cargo build`, `sgcia --version`, etc.) still
+runs as your normal user and expects to find it in `~/.cargo` -- mixing
+the two leaves you with a broken, split install.
 
 #### 2. Get the code
 
@@ -177,6 +183,7 @@ Follow these steps in order.
 
    ```bash
    sudo mkdir -p /etc/sgcia /var/lib/sgcia
+   sudo chown "$USER" /etc/sgcia /var/lib/sgcia
    ```
 
    `/etc/sgcia` is where its config file (`config.yaml`) will live.
@@ -184,12 +191,17 @@ Follow these steps in order.
    checkpoints and Windows Event Log bookmarks (see
    `checkpoint_file`/`bookmark_file` in your config) -- sgcia creates
    those files itself as it runs, but the folder needs to already exist.
+   The `chown` makes both folders writable by you directly, so you can
+   run `sgcia edit`/`sgcia run` as yourself without `sudo` -- if you
+   later run it as a **systemd service** under its own dedicated user
+   instead (see below), that service account only needs to *read* the
+   config, which a normal `chown`ed file still allows.
 
 You only need to do all five of these steps **once** per machine. After
-that, `sudo sgcia edit --config /etc/sgcia/config.yaml` (or any other `sgcia
+that, `sgcia edit --config /etc/sgcia/config.yaml` (or any other `sgcia
 ...` command) will just work, from any directory, in any new terminal
-window, forever -- no need to repeat these steps or remember where
-`target/release/sgcia` is.
+window, forever -- no need to repeat these steps, use `sudo`, or
+remember where `target/release/sgcia` is.
 
 #### Troubleshooting: still says "command not found"
 
@@ -208,7 +220,7 @@ window, forever -- no need to repeat these steps or remember where
   --version` again.
 - As a fallback that always works no matter what: you can skip
   installing entirely and just always type the full path instead,
-  e.g. `sudo ./target/release/sgcia edit --config /etc/sgcia/config.yaml`,
+  e.g. `./target/release/sgcia edit --config /etc/sgcia/config.yaml`,
   run from inside the `securitygingercia` folder.
 
 ## Configuring
@@ -221,43 +233,47 @@ and exporter type.
 
 Two ways to build your own:
 
-- **Interactively**: `sudo sgcia edit --config /etc/sgcia/config.yaml` -- see
+- **Interactively**: `sgcia edit --config /etc/sgcia/config.yaml` -- see
   [Using sgcia](#using-sgcia) below for the keybindings. Must be run from
   an actual interactive terminal (SSH session, local shell); it won't
   work piped through something non-interactive like a CI job.
 - **By hand**: copy `configs/example.yaml` and edit the YAML directly,
   then `sgcia check --config /etc/sgcia/config.yaml` to validate.
 
-
-### Setting Up Secrets & Environment Variables
-
-`sgcia` substitutes `${VAR_NAME}` placeholders in your `config.yaml` using process environment variables.
-
-#### Option A: Terminal Session
-Export the variables directly in your terminal session before launching `sgcia`:
-
-export S1_HEC_TOKEN="your-sentinelone-token"
-export SPLUNK_HEC_TOKEN="your-splunk-token"
-
-#### Option B: Systemd Environment File
-When running as a systemd service, `sgcia` reads environment variables from `/etc/sgcia/sgcia.env`:
-
-1. Copy the example environment file:
-   sudo cp packaging/systemd/sgcia.env.example /etc/sgcia/sgcia.env
-2. Edit the file to set your actual tokens:
-   sudo nano /etc/sgcia/sgcia.env
-3. Restrict permissions to protect secrets:
-   sudo chown sgcia:sgcia /etc/sgcia/sgcia.env
-   sudo chmod 600 /etc/sgcia/sgcia.env
-
+### Secrets
 
 HEC tokens are referenced in the config as `${VAR_NAME}` (e.g. `token:
 ${S1_HEC_TOKEN}`) and substituted from the process environment at load
 time -- the literal `${...}` stays in the YAML file on disk, so the
-config itself never contains a real secret. Supply the actual value via
-whatever environment sgcia runs under (an exported shell variable for a
-quick test, or the `EnvironmentFile=` mechanism in the systemd unit below
-for a real deployment).
+config itself never contains a real secret. Two ways to supply the real
+value, depending on how you're running sgcia:
+
+**Option A: a quick terminal test.** Export the variable in the same
+shell session before running `sgcia`:
+
+```bash
+export S1_HEC_TOKEN="your-sentinelone-token"
+export SPLUNK_HEC_TOKEN="your-splunk-token"
+sgcia run --config /etc/sgcia/config.yaml
+```
+
+This only lasts for that terminal session -- close it and you'd need to
+export again.
+
+**Option B: a real deployment via systemd.** systemd reads environment
+variables for the service from `/etc/sgcia/sgcia.env` (via
+`EnvironmentFile=` in the unit -- see
+[Running as a systemd service](#running-as-a-systemd-service-linux)
+below):
+
+```bash
+sudo cp packaging/systemd/sgcia.env.example /etc/sgcia/sgcia.env
+sudo "$EDITOR" /etc/sgcia/sgcia.env   # fill in your real tokens
+sudo chmod 600 /etc/sgcia/sgcia.env   # secrets file, keep it non-world-readable
+```
+
+(The systemd walkthrough below also has this same file, since the
+service needs it regardless of whether you set it up now or then.)
 
 ### Privileged ports
 
@@ -330,7 +346,7 @@ on screen rather than blanking. Press `q` or `Esc` to quit.
 ### `sgcia edit` -- interactive config editor
 
 ```bash
-sudo sgcia edit --config /etc/sgcia/config.yaml
+sgcia edit --config /etc/sgcia/config.yaml
 ```
 
 Works entirely offline against the YAML file -- it never talks to a
@@ -443,7 +459,7 @@ script -- both are interactive terminal UIs):
 
 ```bash
 sgcia dashboard --status-addr 127.0.0.1:7801
-sudo sgcia edit --config /etc/sgcia/config.yaml   # then `sudo systemctl restart sgcia` to apply
+sgcia edit --config /etc/sgcia/config.yaml   # then `sudo systemctl restart sgcia` to apply
 ```
 
 ## The status API
