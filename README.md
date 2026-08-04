@@ -619,12 +619,17 @@ Four checks, in order of how much they actually prove:
    confirm the counters move. `logger` below is the util-linux version
    (standard on Linux; macOS's built-in `logger` doesn't support
    sending over the network) -- match `-P`/`-d` (UDP) or `-T` (TCP) to
-   whichever protocol/port your receiver actually listens on:
+   whichever protocol/port your receiver actually listens on, and
+   include `--rfc3164`: newer `logger` versions default to RFC 5424,
+   which `protocol: rfc3164` (the example config's default) doesn't
+   recognize at all -- the whole raw RFC 5424 line lands unparsed in
+   `body` with `severity: UNSPECIFIED` instead of erroring, which is
+   easy to mistake for "it's basically working":
 
    ```bash
    # from the collector box, simulating a remote sender over the network
    # (UDP, matching syslog/udp's default 0.0.0.0:514 in the example config):
-   logger -n 127.0.0.1 -P 514 -d "deployment verification test"
+   logger -n 127.0.0.1 -P 514 -d --rfc3164 "deployment verification test"
    sleep 2
    curl -s http://127.0.0.1:7801/status | jq '.receivers, .pipelines, .exporters'
    ```
@@ -846,6 +851,18 @@ just another way to look at the same loopback-only endpoints.
   the unit reads it correctly on its own), or source it into your
   current shell first if you specifically want to run/validate by hand:
   `set -a; source /etc/sgcia/sgcia.env; set +a`.
+
+- **A `syslog` receiver accepts events with no error, but `body` is the
+  entire raw line (priority/timestamp/hostname and all) and
+  `severity` comes back `UNSPECIFIED`.** The sender and the receiver's
+  `protocol` field disagree about which syslog RFC is on the wire --
+  most commonly, a newer `logger` defaults to RFC 5424 while `protocol:
+  rfc3164` (the example config's default) expects RFC 3164, so the
+  parser doesn't recognize the envelope at all and passes the whole
+  line through unparsed instead of erroring. Confirm what your sender
+  actually emits (`logger --help` lists `--rfc3164`/`--rfc5424`), and
+  match `protocol` to it, or force the sender to the format your
+  receiver expects (e.g. `logger ... --rfc3164`).
 
 - **`directory must exist: ... no such file or directory`** from the
   `file_storage` extension: add `create_directory: true` to it (see
