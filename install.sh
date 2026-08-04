@@ -217,12 +217,17 @@ if have systemctl && [ -d /run/systemd/system ]; then
   sudo chgrp sgcia /etc/sgcia/config.yaml
   sudo chmod 640 /etc/sgcia/config.yaml
   sudo cp "$REPO_ROOT/packaging/systemd/sgcia.service" /etc/systemd/system/sgcia.service
+  if [ ! -f /etc/sgcia/sgcia.env ]; then
+    sudo cp "$REPO_ROOT/packaging/systemd/sgcia.env.example" /etc/sgcia/sgcia.env
+    sudo chown sgcia:sgcia /etc/sgcia/sgcia.env
+    sudo chmod 600 /etc/sgcia/sgcia.env
+  fi
   sudo systemctl daemon-reload
   sudo systemctl enable sgcia
   SERVICE_SET_UP=1
   info "installed and enabled (starts automatically on every future boot) -- not started yet,"
-  info "since the config above still has placeholder secrets/paths. Once you've edited it for"
-  info "real: sudo systemctl start sgcia"
+  info "since the config and /etc/sgcia/sgcia.env above still have placeholder secrets/paths."
+  info "Once you've edited both for real: sudo systemctl start sgcia"
 else
   info "no systemd detected -- skipping service setup (see README.md's systemd section for"
   info "the manual equivalent, or MANUAL.md for non-systemd platforms)"
@@ -240,9 +245,22 @@ Both binaries are installed:
 Next steps (see README.md for details on each):
   1. Edit /etc/sgcia/config.yaml -- by hand, or interactively with:
        sgcia edit --config /etc/sgcia/config.yaml
+EOF
+if [ "$SERVICE_SET_UP" -eq 1 ]; then
+  cat <<EOF
+  2. Edit /etc/sgcia/sgcia.env (already created, placeholder tokens --
+     the systemd service reads it automatically, no copying needed):
+       sudo \$EDITOR /etc/sgcia/sgcia.env
+EOF
+else
+  cat <<EOF
   2. Put real secrets (HEC tokens, etc.) somewhere your config's \${VAR_NAME}
      references can read them -- see the "Secrets" section of README.md.
-  3. Check the config is valid:
+EOF
+fi
+cat <<EOF
+  3. Check the config is valid (sgcia.env isn't read outside systemd --
+     source it first if validate complains your tokens are still empty):
        sgcia-otelcol validate --config file:/etc/sgcia/config.yaml
 EOF
 if [ "$SERVICE_SET_UP" -eq 1 ]; then

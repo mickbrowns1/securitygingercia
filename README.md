@@ -111,18 +111,25 @@ exporters, extensions, and pipelines, validated against the real
 HEC tokens and similar are referenced in the config as `${VAR_NAME}`
 and substituted from the environment at load time -- never written into
 the YAML file itself. For a real (systemd) deployment, that's one file:
+`/etc/sgcia/sgcia.env`.
+
+**If you used `install.sh`** (on a systemd Linux host), this file
+already exists -- it creates and enables the service for you, including
+this file with placeholder tokens. Just edit it:
+
+```bash
+sudo "$EDITOR" /etc/sgcia/sgcia.env   # fill in your real tokens
+```
+
+**Otherwise** (built manually via [MANUAL.md](MANUAL.md), or setting up
+the systemd service yourself), create it from the example first:
 
 ```bash
 sudo cp ~/securitygingercia/packaging/systemd/sgcia.env.example /etc/sgcia/sgcia.env  # adjust the path if you cloned elsewhere
 sudo "$EDITOR" /etc/sgcia/sgcia.env   # fill in your real tokens
+sudo chown sgcia:sgcia /etc/sgcia/sgcia.env
 sudo chmod 600 /etc/sgcia/sgcia.env   # secrets file, keep it non-world-readable
 ```
-
-`install.sh` clones to `~/securitygingercia` if it needs to clone at
-all -- this only matters if your shell's current directory isn't
-already inside that checkout; `sudo cp` fails with `No such file or
-directory` otherwise, since `~/securitygingercia` isn't where you
-happen to be sitting.
 
 See [Secrets](#secrets) below for a quick-terminal-test alternative and
 how this file gets read by the systemd unit.
@@ -522,11 +529,13 @@ swap the `debug` exporter for a real `splunk_hec` one once you're ready.
 ## Running as a systemd service (Linux)
 
 **Already ran `install.sh`?** It already created the `sgcia` user,
-installed the unit, and ran `systemctl enable` for you -- skip straight
-to editing `/etc/sgcia/sgcia.env`/`config.yaml` below, then `sudo
-systemctl start sgcia`. The block below is still safe to run again
-except for its first line (`useradd` errors, harmlessly, on a user that
-already exists).
+installed the unit, ran `systemctl enable`, and created
+`/etc/sgcia/sgcia.env` (placeholder tokens) for you -- skip straight to
+editing `sgcia.env`/`config.yaml` below, then `sudo systemctl start
+sgcia`. The block below is still safe to run again except for its first
+line (`useradd` errors, harmlessly, on a user that already exists) and
+the two `cp` lines (harmless overwrites of files already in place, but
+re-copying `sgcia.env.example` would clobber tokens you've already set).
 
 A starter unit is at
 [`packaging/systemd/sgcia.service`](packaging/systemd/sgcia.service).
