@@ -529,8 +529,8 @@ sudo "$EDITOR" /etc/sgcia/sgcia.env   # fill in real HEC token(s)
 sudo chown sgcia:sgcia /etc/sgcia/sgcia.env
 sudo chmod 600 /etc/sgcia/sgcia.env   # secrets file, keep it non-world-readable
 sudo "$EDITOR" /etc/sgcia/config.yaml  # your actual config (start from otelcol/config/example.yaml)
-sudo chown sgcia:sgcia /etc/sgcia/config.yaml  # the service runs as sgcia, not you -- it needs read access too
-sudo chmod 600 /etc/sgcia/config.yaml  # optional, but do this if a real secret ended up written directly into it
+sudo chgrp sgcia /etc/sgcia/config.yaml  # group (not owner!) read access for the service -- keeps it
+sudo chmod 640 /etc/sgcia/config.yaml    # editable as yourself (no sudo) via `sgcia edit` afterward too
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now sgcia

@@ -8,11 +8,12 @@
 #
 # What it does, in order: installs git/Go/a C toolchain/Rust if missing,
 # builds sgcia-otelcol (via the OpenTelemetry Collector Builder) and sgcia
-# (via cargo), installs both to /usr/local/bin, and creates /etc/sgcia +
-# /var/lib/sgcia. It deliberately stops there -- writing your actual
-# config and secrets, and setting up the systemd service, are decisions
-# only you can make; see the "Configuring" and "Running as a systemd
-# service" sections of README.md for those next steps.
+# (via cargo), installs both to /usr/local/bin, creates /etc/sgcia +
+# /var/lib/sgcia, and (on systemd Linux) sets up and enables the sgcia
+# service -- enabled, not started, since the starter config it drops in
+# still has placeholder secrets/paths. It deliberately stops there --
+# writing your actual config and secrets are decisions only you can make;
+# see the "Configuring" section of README.md for those next steps.
 
 set -euo pipefail
 
@@ -204,6 +205,29 @@ else
   info "/etc/sgcia/config.yaml already exists -- leaving it alone"
 fi
 
+# --- 5. systemd service (Linux only -- enabled, not started) ---
+
+SERVICE_SET_UP=0
+if have systemctl && [ -d /run/systemd/system ]; then
+  step "Setting up the sgcia systemd service"
+  id sgcia >/dev/null 2>&1 || sudo useradd --system --home /var/lib/sgcia --shell /usr/sbin/nologin sgcia
+  sudo chown -R sgcia:sgcia /var/lib/sgcia
+  # Group (not owner!) read access for the service -- keeps config.yaml
+  # editable as yourself, without sudo, via `sgcia edit` afterward too.
+  sudo chgrp sgcia /etc/sgcia/config.yaml
+  sudo chmod 640 /etc/sgcia/config.yaml
+  sudo cp "$REPO_ROOT/packaging/systemd/sgcia.service" /etc/systemd/system/sgcia.service
+  sudo systemctl daemon-reload
+  sudo systemctl enable sgcia
+  SERVICE_SET_UP=1
+  info "installed and enabled (starts automatically on every future boot) -- not started yet,"
+  info "since the config above still has placeholder secrets/paths. Once you've edited it for"
+  info "real: sudo systemctl start sgcia"
+else
+  info "no systemd detected -- skipping service setup (see README.md's systemd section for"
+  info "the manual equivalent, or MANUAL.md for non-systemd platforms)"
+fi
+
 step "Done"
 "$REPO_ROOT/otelcol/dist/sgcia-otelcol" --version || true
 "$REPO_ROOT/target/release/sgcia" --version || true
@@ -220,10 +244,23 @@ Next steps (see README.md for details on each):
      references can read them -- see the "Secrets" section of README.md.
   3. Check the config is valid:
        sgcia-otelcol validate --config file:/etc/sgcia/config.yaml
+EOF
+if [ "$SERVICE_SET_UP" -eq 1 ]; then
+  cat <<EOF
+  4. Start the systemd service (already enabled for future boots):
+       sudo systemctl start sgcia
+       journalctl -u sgcia -f
+EOF
+else
+  cat <<EOF
   4. Run it directly to try it out:
        sgcia-otelcol --config file:/etc/sgcia/config.yaml
-     ...or set it up as a systemd service for a real deployment -- see
-     the "Running as a systemd service (Linux)" section of README.md.
+     ...or set it up as a service for a real deployment -- see the
+     "Running as a systemd service" section of README.md (Linux) or
+     MANUAL.md (other platforms).
+EOF
+fi
+cat <<EOF
   5. Watch it run:
        sgcia dashboard --status-addr 127.0.0.1:7801
      ...or open http://127.0.0.1:7801/ in a browser once it's running.
