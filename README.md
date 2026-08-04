@@ -333,10 +333,10 @@ own auth/network control in front of them -- see
 ## Using sgcia
 
 ```
-sgcia-otelcol --config file:x.yaml                # run the collector
-sgcia-otelcol validate --config file:x.yaml        # validate config, then exit
-sgcia edit --config x.yaml                         # interactive config editor
-sgcia dashboard [--status-addr 127.0.0.1:7801]     # live monitoring dashboard
+sgcia-otelcol --config file:/etc/sgcia/config.yaml            # run the collector
+sgcia-otelcol validate --config file:/etc/sgcia/config.yaml   # validate config, then exit
+sgcia edit --config /etc/sgcia/config.yaml                    # interactive config editor
+sgcia dashboard [--status-addr 127.0.0.1:7801]                # live monitoring dashboard
 ```
 
 ### `sgcia-otelcol validate` -- validate a config
