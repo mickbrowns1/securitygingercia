@@ -730,7 +730,9 @@ sudo cp packaging/systemd/sgcia.env.example /etc/sgcia/sgcia.env
 sudo "$EDITOR" /etc/sgcia/sgcia.env   # fill in real HEC token(s)
 sudo chown sgcia:sgcia /etc/sgcia/sgcia.env
 sudo chmod 600 /etc/sgcia/sgcia.env   # secrets file, keep it non-world-readable
-sudo "$EDITOR" /etc/sgcia/config.yaml # your actual config (start from otelcol/config/example.yaml)
+sudo "$EDITOR" /etc/sgcia/config.yaml  # your actual config (start from otelcol/config/example.yaml)
+sudo chown sgcia:sgcia /etc/sgcia/config.yaml  # the service runs as sgcia, not you -- it needs read access too
+sudo chmod 600 /etc/sgcia/config.yaml  # optional, but do this if a real secret ended up written directly into it
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now sgcia
@@ -744,6 +746,18 @@ bind privileged ports (514/601) -- remove that line if every
 `ProtectSystem=strict`, so if your config's `file_storage` extension's
 `directory` points outside `/var/lib/sgcia`, either move it under there
 or add the real directory to `ReadWritePaths=` in the unit.
+
+If a `file_log` receiver points at a file owned by some other system
+group -- e.g. `/var/log/syslog`, owned by `syslog:adm` on Debian/Ubuntu --
+add `sgcia` to that group too, or the receiver just logs a `permission
+denied` on every poll instead of actually failing to start (the service
+itself still shows `active (running)`, so this is easy to miss unless
+you check `journalctl`):
+
+```bash
+sudo usermod -aG adm sgcia   # group name varies by distro/file -- check `ls -la` on the file itself
+sudo systemctl restart sgcia
+```
 
 Once it's running as a service, use `sgcia dashboard` and `sgcia edit`
 over an actual SSH session to the box (not through `systemctl` or a
