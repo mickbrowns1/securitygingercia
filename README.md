@@ -715,13 +715,17 @@ the security boundary):
   from `service.pipelines` in the config above (not live data -- this
   collector only has a logs signal, so there's no runtime call graph to
   draw from). Powers the web UI's Topology view.
-- `GET /logs?q=&severity=` -- the current contents of an in-memory,
-  ~500-event rolling buffer of actual log record content (timestamp,
-  severity, body, attributes, resource), optionally filtered by a
-  case-insensitive substring (`q`) and/or exact severity match
-  (`severity`). Empty unless at least one pipeline has a `logbuffer`
-  exporter (see [Available components](#available-components) and
-  [The web UI](#the-web-ui) below) -- nothing is captured otherwise.
+- `GET /logs?q=&severity=&attr_key=&attr_value=` -- the current contents
+  of an in-memory, ~500-event rolling buffer of actual log record
+  content (timestamp, severity, body, attributes, resource), optionally
+  filtered by a case-insensitive substring (`q`), an exact severity
+  match (`severity`), and/or an exact (not substring) match of
+  `attr_key` against either the attributes or resource map
+  (`attr_value`) -- this last pair is what powers the web UI's
+  click-a-badge-to-correlate feature. Empty unless at least one pipeline
+  has a `logbuffer` exporter (see [Available
+  components](#available-components) and [The web UI](#the-web-ui)
+  below) -- nothing is captured otherwise.
 - `GET /` -- the embedded web UI itself (see [The web UI](#the-web-ui)).
 
 ```console
@@ -769,13 +773,19 @@ no separate process, no build step, no Node. Three views:
 
 - **Health** -- uptime plus per-receiver/pipeline/exporter counters,
   polling `/status` every few seconds. The same data `sgcia dashboard`
-  shows in a terminal, in a browser instead.
+  shows in a terminal, in a browser instead. Each row's relative volume
+  (that row's count against the busiest row in the same table) renders
+  as a subtle background bar, so a noisy receiver/pipeline/exporter is
+  visible at a glance without reading every number.
 - **Logs** -- a live-updating table of actual log record content from
   the `/logs` buffer, with a search box (matches body/attributes/
-  resource) and a severity filter. Empty until at least one pipeline has
-  a `logbuffer` exporter attached (see [Available
-  components](#available-components) above) -- add one via `sgcia edit`
-  or by hand, same as any other exporter.
+  resource) and a severity filter. Every attribute/resource value also
+  renders as a clickable badge -- click one to filter the view to only
+  other events sharing that exact key=value, a quick way to answer
+  "what else happened on this host/session?" without typing a query.
+  Empty until at least one pipeline has a `logbuffer` exporter attached
+  (see [Available components](#available-components) above) -- add one
+  via `sgcia edit` or by hand, same as any other exporter.
 - **Topology** -- a receiver → pipeline → exporter diagram built from
   `/topology`, so it's easy to see at a glance which destinations each
   input actually feeds, especially once a config has several pipelines.

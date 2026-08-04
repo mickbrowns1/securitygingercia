@@ -150,9 +150,12 @@ func (e *statusCfgExtension) handleTopology(w http.ResponseWriter, _ *http.Reque
 
 // handleGetLogs serves the current contents of the in-memory log
 // buffer (empty if no pipeline includes a logbuffer exporter), optionally
-// filtered by ?q=<substring> and/or ?severity=<exact match>.
+// filtered by ?q=<substring>, ?severity=<exact match>, and/or
+// ?attr_key=<key>&attr_value=<value> (exact match against either the
+// attributes or resource map -- powers the web UI's click-to-correlate).
 func (e *statusCfgExtension) handleGetLogs(w http.ResponseWriter, r *http.Request) {
-	entries := e.buffer.Snapshot(r.URL.Query().Get("q"), r.URL.Query().Get("severity"))
+	q := r.URL.Query()
+	entries := e.buffer.Snapshot(q.Get("q"), q.Get("severity"), q.Get("attr_key"), q.Get("attr_value"))
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(entries); err != nil {
 		e.logger.Error("statuscfg: encoding /logs response", zap.Error(err))

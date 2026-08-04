@@ -9,6 +9,7 @@
     knownSeverities: new Set(),
     logsTimer: null,
     healthTimer: null,
+    corrFilter: null, // { key, value } | null -- set by clicking an attribute badge in the Logs view
   };
 
   function $(id) { return document.getElementById(id); }
@@ -80,26 +81,45 @@
     return s + "s";
   }
 
+  // volBarStyle renders relative volume (this row's count against the
+  // busiest row in the same table) as a subtle background gradient --
+  // a cheap, layout-free stand-in for a real bar chart, using data
+  // that's already being polled for the numbers themselves.
+  function volBarStyle(value, max) {
+    var pct = max > 0 ? Math.round((value / max) * 100) : 0;
+    return ' style="background: linear-gradient(to right, var(--vol-bar) ' + pct + '%, transparent ' + pct + '%)"';
+  }
+
   function renderPipelines(pipelines) {
-    var rows = Object.keys(pipelines || {}).sort().map(function (name) {
+    var names = Object.keys(pipelines || {}).sort();
+    var max = 0;
+    names.forEach(function (n) { max = Math.max(max, pipelines[n].events_in || 0); });
+    var rows = names.map(function (name) {
       var p = pipelines[name];
-      return "<tr><td>" + escapeHTML(name) + "</td><td class=\"numeric\">" + p.events_in +
+      return "<tr" + volBarStyle(p.events_in, max) + "><td>" + escapeHTML(name) + "</td><td class=\"numeric\">" + p.events_in +
         "</td><td class=\"numeric\">" + p.events_out + "</td><td class=\"numeric\">" + p.events_dropped + "</td></tr>";
     });
     $("pipelines-body").innerHTML = rows.join("") || emptyRow(4);
   }
 
   function renderReceivers(receivers) {
-    var rows = Object.keys(receivers || {}).sort().map(function (id) {
-      return "<tr><td>" + escapeHTML(id) + "</td><td class=\"numeric\">" + receivers[id].events_in + "</td></tr>";
+    var ids = Object.keys(receivers || {}).sort();
+    var max = 0;
+    ids.forEach(function (id) { max = Math.max(max, receivers[id].events_in || 0); });
+    var rows = ids.map(function (id) {
+      var v = receivers[id].events_in || 0;
+      return "<tr" + volBarStyle(v, max) + "><td>" + escapeHTML(id) + "</td><td class=\"numeric\">" + v + "</td></tr>";
     });
     $("receivers-body").innerHTML = rows.join("") || emptyRow(2);
   }
 
   function renderExporters(exporters) {
-    var rows = Object.keys(exporters || {}).sort().map(function (id) {
+    var ids = Object.keys(exporters || {}).sort();
+    var max = 0;
+    ids.forEach(function (id) { max = Math.max(max, exporters[id].events_in || 0); });
+    var rows = ids.map(function (id) {
       var e = exporters[id];
-      return "<tr><td>" + escapeHTML(id) + "</td><td class=\"numeric\">" + e.events_in +
+      return "<tr" + volBarStyle(e.events_in, max) + "><td>" + escapeHTML(id) + "</td><td class=\"numeric\">" + e.events_in +
         "</td><td class=\"numeric\">" + e.batches_sent + "</td><td class=\"numeric\">" + e.batches_failed + "</td></tr>";
     });
     $("exporters-body").innerHTML = rows.join("") || emptyRow(4);
@@ -149,37 +169,75 @@
     select.value = current;
   }
 
-  function renderAttrs(entry) {
+  // Each attribute/resource pair renders as a clickable badge -- click
+  // one to filter the log view to only other events with that exact
+  // key=value (a lightweight correlation tool, e.g. "what else happened
+  // on this host/session?"). Exact match, not substring -- see the
+  // matching backend note in logbuffer.go's Snapshot for why that
+  // matters.
+  function renderAttrBadges(entry) {
     var parts = [];
-    if (entry.attributes) {
-      Object.keys(entry.attributes).forEach(function (k) {
-        parts.push(escapeHTML(k) + "=" + escapeHTML(entry.attributes[k]));
+    function addBadges(map) {
+      if (!map) return;
+      Object.keys(map).forEach(function (k) {
+        var v = map[k];
+        parts.push('<span class="corr-badge" data-key="' + escapeHTML(k) + '" data-value="' + escapeHTML(v) +
+          '" title="Click to filter to events with ' + escapeHTML(k) + "=" + escapeHTML(v) + '">' +
+          escapeHTML(k) + "=" + escapeHTML(v) + "</span>");
       });
     }
-    if (entry.resource) {
-      Object.keys(entry.resource).forEach(function (k) {
-        parts.push(escapeHTML(k) + "=" + escapeHTML(entry.resource[k]));
-      });
+    addBadges(entry.attributes);
+    addBadges(entry.resource);
+    return parts.join("");
+  }
+
+  function updateCorrChip() {
+    var chip = $("corr-chip");
+    if (!state.corrFilter) {
+      chip.style.display = "none";
+      chip.innerHTML = "";
+      return;
     }
-    return parts.join(", ");
+    chip.style.display = "flex";
+    chip.innerHTML = "Filtering: <strong>" + escapeHTML(state.corrFilter.key) + "=" + escapeHTML(state.corrFilter.value) +
+      '</strong> <button id="corr-clear" type="button">&times;</button>';
+    $("corr-clear").addEventListener("click", function () {
+      state.corrFilter = null;
+      updateCorrChip();
+      loadLogs();
+    });
   }
 
   function renderLogs(entries) {
-    $("logs-empty").style.display = entries.length === 0 ? "block" : "none";
+    var filterActive = !!(state.corrFilter || $("logs-query").value.trim() || $("logs-severity").value);
+    var emptyEl = $("logs-empty");
+    if (entries.length === 0) {
+      emptyEl.style.display = "block";
+      emptyEl.innerHTML = filterActive
+        ? "No matching events."
+        : 'No log records yet. Add a <code>logbuffer</code> exporter to a logs pipeline to see events here.';
+    } else {
+      emptyEl.style.display = "none";
+    }
     var rows = entries.slice().reverse().map(function (e) {
       var t = e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : "";
       return "<tr><td>" + escapeHTML(t) + '</td><td><span class="sev-badge ' + severityClass(e.severity) +
         '">' + escapeHTML(e.severity || "") + '</span></td><td class="body-cell">' + escapeHTML(e.body) +
-        '</td><td class="attrs-cell">' + renderAttrs(e) + "</td></tr>";
+        '</td><td class="attrs-cell">' + renderAttrBadges(e) + "</td></tr>";
     });
     $("logs-body").innerHTML = rows.join("");
   }
 
   function loadLogs() {
-    var q = $("logs-query").value.trim();
     var severity = $("logs-severity").value;
     var params = new URLSearchParams();
-    if (q) params.set("q", q);
+    if (state.corrFilter) {
+      params.set("attr_key", state.corrFilter.key);
+      params.set("attr_value", state.corrFilter.value);
+    } else {
+      var q = $("logs-query").value.trim();
+      if (q) params.set("q", q);
+    }
     if (severity) params.set("severity", severity);
     var path = "logs" + (params.toString() ? "?" + params.toString() : "");
     fetchJSON(path).then(function (entries) {
@@ -191,9 +249,20 @@
 
   $("logs-refresh").addEventListener("click", loadLogs);
   $("logs-query").addEventListener("keydown", function (ev) {
-    if (ev.key === "Enter") loadLogs();
+    if (ev.key !== "Enter") return;
+    state.corrFilter = null;
+    updateCorrChip();
+    loadLogs();
   });
   $("logs-severity").addEventListener("change", loadLogs);
+  $("logs-body").addEventListener("click", function (ev) {
+    var badge = ev.target.closest(".corr-badge");
+    if (!badge) return;
+    state.corrFilter = { key: badge.dataset.key, value: badge.dataset.value };
+    $("logs-query").value = "";
+    updateCorrChip();
+    loadLogs();
+  });
 
   // ---- Topology view ----
 

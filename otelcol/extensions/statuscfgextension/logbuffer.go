@@ -51,10 +51,15 @@ func (b *logBuffer) Push(entries []LogEntry) {
 }
 
 // Snapshot returns entries in chronological order (oldest first),
-// optionally filtered by a case-insensitive substring match against the
-// body/attributes/resource (query) and/or an exact, case-insensitive
-// severity match.
-func (b *logBuffer) Snapshot(query, severity string) []LogEntry {
+// optionally filtered by any combination of: a case-insensitive
+// substring match against the body/attributes/resource (query), an
+// exact case-insensitive severity match, and an exact (not substring)
+// match of attrKey against either the attributes or resource map --
+// this last one is what powers the web UI's click-a-badge-to-correlate
+// feature, where "exact" matters: a substring match on e.g. a numeric
+// session id would pick up unrelated events that just happen to contain
+// the same digits somewhere in their body text.
+func (b *logBuffer) Snapshot(query, severity, attrKey, attrValue string) []LogEntry {
 	b.mu.Lock()
 	ordered := make([]LogEntry, 0, logBufferCapacity)
 	if b.full {
@@ -65,13 +70,16 @@ func (b *logBuffer) Snapshot(query, severity string) []LogEntry {
 	}
 	b.mu.Unlock()
 
-	if query == "" && severity == "" {
+	if query == "" && severity == "" && attrKey == "" {
 		return ordered
 	}
 	query = strings.ToLower(query)
 	out := make([]LogEntry, 0, len(ordered))
 	for _, e := range ordered {
 		if severity != "" && !strings.EqualFold(e.Severity, severity) {
+			continue
+		}
+		if attrKey != "" && e.Attributes[attrKey] != attrValue && e.Resource[attrKey] != attrValue {
 			continue
 		}
 		if query != "" && !strings.Contains(strings.ToLower(e.Body), query) &&
