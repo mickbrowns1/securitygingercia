@@ -818,6 +818,16 @@ just another way to look at the same loopback-only endpoints.
   the service; if running by hand, `cd` there first or use an absolute
   path).
 
+- **`requires a non-empty "token"`/`api_key is required`** from
+  `sgcia-otelcol validate` or `sgcia-otelcol` itself, even though you've
+  already filled in `/etc/sgcia/sgcia.env`: that file is only read
+  automatically by the **systemd unit** (`EnvironmentFile=` in the unit
+  file) -- running either command directly in your own shell doesn't
+  source it. Either `sudo systemctl start sgcia` (the real path, since
+  the unit reads it correctly on its own), or source it into your
+  current shell first if you specifically want to run/validate by hand:
+  `set -a; source /etc/sgcia/sgcia.env; set +a`.
+
 - **`directory must exist: ... no such file or directory`** from the
   `file_storage` extension: add `create_directory: true` to it (see
   [`otelcol/config/example.yaml`](otelcol/config/example.yaml)), or
