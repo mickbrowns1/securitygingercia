@@ -571,7 +571,11 @@ impl App {
                         self.status_message = Some(format!("saved {}", self.config_path.display()));
                     }
                     Err(e) => {
-                        self.status_message = Some(format!("save failed: {e}"));
+                        let mut message = format!("save failed: {e}");
+                        if let Some(hint) = save_error_hint(&message) {
+                            message.push_str(hint);
+                        }
+                        self.status_message = Some(message);
                     }
                 }
                 Screen::TopLevel { tab, selected }
@@ -687,6 +691,19 @@ fn tab_for(category: ComponentCategory) -> TopTab {
     }
 }
 
+// The real binary's own error text for this is accurate but easy to miss
+// the implication of if you're not already expecting it -- most people
+// hit this by testing a config (that still has the example's
+// windows_event_log/security receiver) on a non-Windows box, so spell out
+// the fix right where the failure shows up instead of just the raw error.
+fn save_error_hint(message: &str) -> Option<&'static str> {
+    if message.contains("windows_event_log") {
+        Some(" -- windows_event_log only works if sgcia-otelcol runs on Windows; remove it and its pipeline to test elsewhere")
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,6 +711,20 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::from(code)
+    }
+
+    #[test]
+    fn save_error_hint_flags_the_windows_event_log_pipeline_build_failure() {
+        let message = "save failed: invalid config: Error: failed to build pipelines: \
+            failed to create \"windows_event_log/security\" receiver for data type \"logs\": \
+            windows eventlog receiver is only supported on Windows";
+        let hint = save_error_hint(message).expect("should recognize this failure");
+        assert!(hint.contains("Windows"));
+    }
+
+    #[test]
+    fn save_error_hint_is_none_for_unrelated_failures() {
+        assert!(save_error_hint("save failed: invalid config: Error: requires a non-empty \"token\"").is_none());
     }
 
     /// FILE_LOG_FIELDS order is include, exclude, start_at, poll_interval,

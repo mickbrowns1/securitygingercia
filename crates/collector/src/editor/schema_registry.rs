@@ -158,7 +158,7 @@ const WINDOWS_EVENT_LOG_FIELDS: &[FieldSpec] = &[
         FieldKind::Str,
         true,
         None,
-        "Which Windows Event Log to read -- e.g. Security, System, Application.",
+        "Which Windows Event Log to read -- e.g. Security, System, Application. This only works if sgcia-otelcol itself runs on Windows -- on Linux/macOS it fails to even build a pipeline (not just to run), so remove this receiver and whichever pipeline references it before saving/validating there.",
     ),
     f(
         "query",
@@ -539,7 +539,7 @@ const RECEIVER_TYPES: &[ComponentTypeSpec] = &[
     },
     ComponentTypeSpec {
         type_name: "windows_event_log",
-        description: "Reads events from a Windows Event Log channel (Windows only).",
+        description: "Reads events from a Windows Event Log channel. Only works if this collector process itself runs on Windows -- see the channel field's help text for what happens elsewhere.",
         fields: WINDOWS_EVENT_LOG_FIELDS,
     },
 ];

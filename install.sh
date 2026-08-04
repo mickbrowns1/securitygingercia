@@ -191,6 +191,13 @@ sudo chown "$USER" /etc/sgcia /var/lib/sgcia
 if [ ! -f /etc/sgcia/config.yaml ]; then
   step "Copying the example config to /etc/sgcia/config.yaml as a starting point"
   cp "$REPO_ROOT/otelcol/config/example.yaml" /etc/sgcia/config.yaml
+  # The example ships a dev-relative config_path (correct only when run
+  # from inside otelcol/, per README.md's Configuring section) -- rewrite
+  # it to point at this file's real installed location, since the
+  # statuscfg extension re-reads this exact path at startup regardless of
+  # the process's own working directory.
+  sed 's|config_path: .*|config_path: /etc/sgcia/config.yaml|' /etc/sgcia/config.yaml > /etc/sgcia/config.yaml.tmp
+  mv /etc/sgcia/config.yaml.tmp /etc/sgcia/config.yaml
   info "edit it (or run 'sgcia edit --config /etc/sgcia/config.yaml') before going further -- it references"
   info "placeholder secrets and example hosts that won't work as-is."
 else
