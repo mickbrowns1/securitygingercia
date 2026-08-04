@@ -98,7 +98,8 @@
     names.forEach(function (n) { max = Math.max(max, pipelines[n].events_in || 0); });
     var rows = names.map(function (name) {
       var p = pipelines[name];
-      return "<tr><td>" + escapeHTML(name) + "</td>" + volCell(p.events_in, max) +
+      var problem = (p.events_dropped || 0) > 0 || (p.parse_errors || 0) > 0;
+      return "<tr" + (problem ? ' class="row-problem"' : "") + "><td>" + escapeHTML(name) + "</td>" + volCell(p.events_in, max) +
         "<td class=\"numeric\">" + p.events_out + "</td><td class=\"numeric\">" + p.events_dropped + "</td></tr>";
     });
     $("pipelines-body").innerHTML = rows.join("") || emptyRow(4);
@@ -115,13 +116,23 @@
     $("receivers-body").innerHTML = rows.join("") || emptyRow(2);
   }
 
+  // last_error (message + timestamp) already comes back from /status but
+  // previously had nowhere to show up in the UI at all -- the only way to
+  // see *why* an exporter was failing was journalctl on the box itself.
+  function errorIndicator(lastError) {
+    if (!lastError || !lastError.message) return "";
+    var when = lastError.at ? new Date(lastError.at).toLocaleString() : "unknown time";
+    return ' <span class="err-indicator" title="' + escapeHTML(when + ": " + lastError.message) + '">!</span>';
+  }
+
   function renderExporters(exporters) {
     var ids = Object.keys(exporters || {}).sort();
     var max = 0;
     ids.forEach(function (id) { max = Math.max(max, exporters[id].events_in || 0); });
     var rows = ids.map(function (id) {
       var e = exporters[id];
-      return "<tr><td>" + escapeHTML(id) + "</td>" + volCell(e.events_in, max) +
+      var problem = (e.batches_failed || 0) > 0;
+      return "<tr" + (problem ? ' class="row-problem"' : "") + "><td>" + escapeHTML(id) + errorIndicator(e.last_error) + "</td>" + volCell(e.events_in, max) +
         "<td class=\"numeric\">" + e.batches_sent + "</td><td class=\"numeric\">" + e.batches_failed + "</td></tr>";
     });
     $("exporters-body").innerHTML = rows.join("") || emptyRow(4);
@@ -318,51 +329,123 @@
     loadLogs();
   });
 
-  // ---- Topology view ----
+  // ---- Topology view (Sankey diagram) ----
 
-  function renderTopology(graph) {
+  // A receiver's own events_in exactly sizes its edge into whichever
+  // pipeline it feeds (a receiver belongs to at most one pipeline in
+  // practice), and a pipeline's events_out exactly sizes its edge into
+  // *every* exporter it feeds -- each exporter attached to a pipeline
+  // gets the pipeline's entire output, not a fraction of it. So unlike
+  // a purely decorative diagram, every link width below is a real,
+  // exact number from /status, not an estimate.
+  function flowFor(status, type, id) {
+    var table = type === "receiver" ? status.receivers : type === "pipeline" ? status.pipelines : status.exporters;
+    var rec = (table || {})[id];
+    if (!rec) return 0;
+    return type === "pipeline" ? (rec.events_out || 0) : (rec.events_in || 0);
+  }
+
+  function sumFlow(list) {
+    return list.reduce(function (s, n) { return s + n.flow; }, 0);
+  }
+
+  var SANKEY_W = 900, SANKEY_H = 420, NODE_W = 150, MIN_NODE_H = 22, NODE_GAP = 10;
+
+  function layoutColumn(list, x, pxPerEvent) {
+    var y = 0;
+    return list.map(function (nd) {
+      var height = MIN_NODE_H + nd.flow * pxPerEvent;
+      var box = { id: nd.id, flow: nd.flow, x: x, y: y, height: height, inCursor: 0, outCursor: 0 };
+      y += height + NODE_GAP;
+      return box;
+    });
+  }
+
+  function sankeyNodeSVG(box, type) {
+    var h = Math.max(box.height, 1);
+    return '<g>' +
+      '<rect x="' + box.x + '" y="' + box.y + '" width="' + NODE_W + '" height="' + h +
+      '" rx="4" class="sankey-node sankey-node-' + type + '"></rect>' +
+      '<foreignObject x="' + box.x + '" y="' + box.y + '" width="' + NODE_W + '" height="' + h + '">' +
+      '<div xmlns="http://www.w3.org/1999/xhtml" class="sankey-label" title="' + escapeHTML(box.id) + '">' +
+      '<span class="sankey-label-name">' + escapeHTML(box.id) + '</span>' +
+      '<span class="sankey-label-count">' + box.flow + '</span>' +
+      '</div></foreignObject></g>';
+  }
+
+  function sankeyLinkSVG(link) {
+    var midX = (link.sx + link.tx) / 2;
+    var half = link.w / 2;
+    var y0top = link.sy - half, y0bot = link.sy + half;
+    var y1top = link.ty - half, y1bot = link.ty + half;
+    var d = "M" + link.sx + "," + y0top +
+      " C" + midX + "," + y0top + " " + midX + "," + y1top + " " + link.tx + "," + y1top +
+      " L" + link.tx + "," + y1bot +
+      " C" + midX + "," + y1bot + " " + midX + "," + y0bot + " " + link.sx + "," + y0bot + " Z";
+    return '<path d="' + d + '" class="sankey-link"><title>' + escapeHTML(link.from + " → " + link.to + ": " + link.flow) + "</title></path>";
+  }
+
+  function renderTopology(graph, status) {
     var nodesByType = { receiver: [], exporter: [], pipeline: [] };
     (graph.nodes || []).forEach(function (n) { nodesByType[n.type] && nodesByType[n.type].push(n); });
 
-    var inbound = {}, outbound = {};
-    (graph.edges || []).forEach(function (edge) {
-      var pipelineIsTarget = nodesByType.pipeline.some(function (p) { return p.id === edge.to; });
-      if (pipelineIsTarget) {
-        (inbound[edge.to] = inbound[edge.to] || []).push(edge.from);
-      } else {
-        (outbound[edge.from] = outbound[edge.from] || []).push(edge.to);
-      }
-    });
+    if (!nodesByType.receiver.length && !nodesByType.pipeline.length && !nodesByType.exporter.length) {
+      $("topology-graph").innerHTML = '<div class="topo-empty">Nothing configured yet.</div>';
+      return;
+    }
 
-    var receiversHTML = nodesByType.receiver.map(function (n) {
-      return '<div class="topo-node">' + escapeHTML(n.id) + "</div>";
-    }).join("") || '<div class="topo-node" style="color:var(--muted)">none configured</div>';
+    var pipelineIds = {};
+    nodesByType.pipeline.forEach(function (p) { pipelineIds[p.id] = true; });
 
-    var exportersHTML = nodesByType.exporter.map(function (n) {
-      return '<div class="topo-node">' + escapeHTML(n.id) + "</div>";
-    }).join("") || '<div class="topo-node" style="color:var(--muted)">none configured</div>';
+    var recv = nodesByType.receiver.map(function (n) { return { id: n.id, flow: flowFor(status, "receiver", n.id) }; })
+      .sort(function (a, b) { return b.flow - a.flow || a.id.localeCompare(b.id); });
+    var pipe = nodesByType.pipeline.map(function (n) { return { id: n.id, flow: flowFor(status, "pipeline", n.id) }; })
+      .sort(function (a, b) { return b.flow - a.flow || a.id.localeCompare(b.id); });
+    var exp = nodesByType.exporter.map(function (n) { return { id: n.id, flow: flowFor(status, "exporter", n.id) }; })
+      .sort(function (a, b) { return b.flow - a.flow || a.id.localeCompare(b.id); });
 
-    var pipelinesHTML = nodesByType.pipeline.map(function (n) {
-      var ins = (inbound[n.id] || []).map(function (id) {
-        return '<span class="topo-badge in">' + escapeHTML(id) + "</span>";
-      }).join("");
-      var outs = (outbound[n.id] || []).map(function (id) {
-        return '<span class="topo-badge out">' + escapeHTML(id) + "</span>";
-      }).join("");
-      return '<div class="topo-node topo-pipeline"><div class="pipe-name">' + escapeHTML(n.id) +
-        '</div><div class="topo-badges">' + ins + outs + "</div></div>";
-    }).join("") || '<div class="topo-node" style="color:var(--muted)">none configured</div>';
+    // One shared scale across the whole diagram (not per-column) so a
+    // link's width matches at both ends instead of visibly tapering.
+    var maxCount = Math.max(recv.length, pipe.length, exp.length, 1);
+    var flexBudget = Math.max(SANKEY_H - NODE_GAP * (maxCount - 1) - MIN_NODE_H * maxCount, 1);
+    var globalMaxTotal = Math.max(sumFlow(recv), sumFlow(pipe), sumFlow(exp), 1);
+    var pxPerEvent = flexBudget / globalMaxTotal;
 
-    $("topology-graph").innerHTML =
-      '<div class="topology-col"><h3>Receivers</h3>' + receiversHTML + "</div>" +
-      '<div class="topology-col"><h3>Pipelines</h3>' + pipelinesHTML + "</div>" +
-      '<div class="topology-col"><h3>Exporters</h3>' + exportersHTML + "</div>";
+    var colGap = (SANKEY_W - NODE_W * 3) / 2;
+    var recvBoxes = layoutColumn(recv, 0, pxPerEvent);
+    var pipeBoxes = layoutColumn(pipe, NODE_W + colGap, pxPerEvent);
+    var expBoxes = layoutColumn(exp, (NODE_W + colGap) * 2, pxPerEvent);
+
+    var byId = {};
+    recvBoxes.forEach(function (b) { byId[b.id] = b; });
+    pipeBoxes.forEach(function (b) { byId[b.id] = b; });
+    expBoxes.forEach(function (b) { byId[b.id] = b; });
+
+    var links = (graph.edges || []).map(function (e) {
+      var s = byId[e.from], t = byId[e.to];
+      if (!s || !t) return null;
+      var flow = pipelineIds[e.to] ? flowFor(status, "receiver", e.from) : flowFor(status, "pipeline", e.from);
+      var w = Math.max(flow * pxPerEvent, flow > 0 ? 1.5 : 0.5);
+      var sy = s.y + s.outCursor + w / 2;
+      s.outCursor += w;
+      var ty = t.y + t.inCursor + w / 2;
+      t.inCursor += w;
+      return { sx: s.x + NODE_W, sy: sy, tx: t.x, ty: ty, w: w, from: e.from, to: e.to, flow: flow };
+    }).filter(Boolean);
+
+    var svg = '<svg viewBox="0 0 ' + SANKEY_W + ' ' + SANKEY_H + '" class="sankey-svg" preserveAspectRatio="xMinYMin meet">' +
+      links.map(sankeyLinkSVG).join("") +
+      recvBoxes.map(function (b) { return sankeyNodeSVG(b, "receiver"); }).join("") +
+      pipeBoxes.map(function (b) { return sankeyNodeSVG(b, "pipeline"); }).join("") +
+      expBoxes.map(function (b) { return sankeyNodeSVG(b, "exporter"); }).join("") +
+      "</svg>";
+    $("topology-graph").innerHTML = svg;
   }
 
   function loadTopology() {
-    fetchJSON("topology").then(function (graph) {
+    Promise.all([fetchJSON("topology"), fetchJSON("status")]).then(function (results) {
       setConnStatus(true);
-      renderTopology(graph);
+      renderTopology(results[0], results[1]);
     }).catch(function (err) { setConnStatus(false, err.message); });
   }
 
@@ -421,6 +504,7 @@
     clearInterval(state.logsTimer);
     state.healthTimer = setInterval(function () {
       if (state.activeView === "health") loadHealth();
+      if (state.activeView === "topology") loadTopology();
     }, HEALTH_POLL_MS);
     state.logsTimer = setInterval(function () {
       if (state.activeView === "logs" && $("logs-autorefresh").checked) loadLogs();

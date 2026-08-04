@@ -788,8 +788,12 @@ no separate process, no build step, no Node. Three views:
   polling `/status` every few seconds. The same data `sgcia dashboard`
   shows in a terminal, in a browser instead. Each row's relative volume
   (that row's count against the busiest row in the same table) renders
-  as a subtle background bar, so a noisy receiver/pipeline/exporter is
-  visible at a glance without reading every number.
+  as a visible meter bar, so a noisy receiver/pipeline/exporter stands
+  out without reading every number. A pipeline with `events_dropped`/
+  `parse_errors` above zero, or an exporter with `batches_failed` above
+  zero, gets a red left-edge stripe; an exporter with a `last_error` also
+  gets a small `!` badge -- hover it for the actual error message and
+  when it happened, without needing `journalctl` on the box.
 - **Logs** -- a live-updating table of actual log record content from
   the `/logs` buffer, with a search box (matches body/attributes/
   resource) and a severity filter. Every attribute/resource value also
@@ -804,9 +808,16 @@ no separate process, no build step, no Node. Three views:
   `logbuffer` exporter attached (see [Available
   components](#available-components) above) -- add one via `sgcia edit`
   or by hand, same as any other exporter.
-- **Topology** -- a receiver → pipeline → exporter diagram built from
-  `/topology`, so it's easy to see at a glance which destinations each
-  input actually feeds, especially once a config has several pipelines.
+- **Topology** -- a receiver → pipeline → exporter Sankey diagram,
+  combining the structural graph from `/topology` with live counts from
+  `/status`: node height and ribbon width are real numbers, not
+  decoration -- a receiver's `events_in` sizes its edge into its
+  pipeline, and a pipeline's `events_out` sizes its edge into *every*
+  exporter it feeds (each attached exporter gets that pipeline's entire
+  output, not a fraction of it, so this is exact, not estimated). Makes
+  it easy to see at a glance which destinations each input actually
+  feeds and how much of the total volume flows where, especially once a
+  config has several pipelines fanning out to shared exporters.
 
 Keyboard shortcuts (press `?` anywhere in the UI for a reminder): `h`/
 `l`/`t` jump to Health/Logs/Topology, `/` focuses the Logs search box,
