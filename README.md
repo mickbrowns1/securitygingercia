@@ -113,10 +113,16 @@ and substituted from the environment at load time -- never written into
 the YAML file itself. For a real (systemd) deployment, that's one file:
 
 ```bash
-sudo cp packaging/systemd/sgcia.env.example /etc/sgcia/sgcia.env
+sudo cp ~/securitygingercia/packaging/systemd/sgcia.env.example /etc/sgcia/sgcia.env  # adjust the path if you cloned elsewhere
 sudo "$EDITOR" /etc/sgcia/sgcia.env   # fill in your real tokens
 sudo chmod 600 /etc/sgcia/sgcia.env   # secrets file, keep it non-world-readable
 ```
+
+`install.sh` clones to `~/securitygingercia` if it needs to clone at
+all -- this only matters if your shell's current directory isn't
+already inside that checkout; `sudo cp` fails with `No such file or
+directory` otherwise, since `~/securitygingercia` isn't where you
+happen to be sitting.
 
 See [Secrets](#secrets) below for a quick-terminal-test alternative and
 how this file gets read by the systemd unit.
@@ -284,7 +290,7 @@ variables for the service from `/etc/sgcia/sgcia.env` (via
 below):
 
 ```bash
-sudo cp packaging/systemd/sgcia.env.example /etc/sgcia/sgcia.env
+sudo cp ~/securitygingercia/packaging/systemd/sgcia.env.example /etc/sgcia/sgcia.env  # adjust the path if you cloned elsewhere
 sudo "$EDITOR" /etc/sgcia/sgcia.env   # fill in your real tokens
 sudo chmod 600 /etc/sgcia/sgcia.env   # secrets file, keep it non-world-readable
 ```
@@ -515,6 +521,13 @@ swap the `debug` exporter for a real `splunk_hec` one once you're ready.
 
 ## Running as a systemd service (Linux)
 
+**Already ran `install.sh`?** It already created the `sgcia` user,
+installed the unit, and ran `systemctl enable` for you -- skip straight
+to editing `/etc/sgcia/sgcia.env`/`config.yaml` below, then `sudo
+systemctl start sgcia`. The block below is still safe to run again
+except for its first line (`useradd` errors, harmlessly, on a user that
+already exists).
+
 A starter unit is at
 [`packaging/systemd/sgcia.service`](packaging/systemd/sgcia.service).
 
@@ -523,8 +536,10 @@ A starter unit is at
 sudo useradd --system --home /var/lib/sgcia --shell /usr/sbin/nologin sgcia
 sudo chown -R sgcia:sgcia /var/lib/sgcia
 
-sudo cp packaging/systemd/sgcia.service /etc/systemd/system/sgcia.service
-sudo cp packaging/systemd/sgcia.env.example /etc/sgcia/sgcia.env
+# Adjust ~/securitygingercia below if you cloned somewhere else --
+# install.sh clones there by default (see the note under Installing).
+sudo cp ~/securitygingercia/packaging/systemd/sgcia.service /etc/systemd/system/sgcia.service
+sudo cp ~/securitygingercia/packaging/systemd/sgcia.env.example /etc/sgcia/sgcia.env
 sudo "$EDITOR" /etc/sgcia/sgcia.env   # fill in real HEC token(s)
 sudo chown sgcia:sgcia /etc/sgcia/sgcia.env
 sudo chmod 600 /etc/sgcia/sgcia.env   # secrets file, keep it non-world-readable
