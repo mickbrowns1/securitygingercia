@@ -766,6 +766,18 @@ message" at the default telemetry level) -- see the comments in
 `otelcol/extensions/statuscfgextension/extension.go` for exactly what's
 approximated and why.
 
+A pipeline's own `events_out`/`events_dropped` are exact only if none of
+its exporters are shared with another pipeline -- OTel's default
+telemetry labels exporter counters by exporter alone, never by
+`(pipeline, exporter)`, so there's no way to know exactly how much of a
+*shared* exporter's total came from any one specific pipeline. When one
+is shared, each pipeline's share is estimated proportionally to its own
+`events_in` relative to the other pipelines using that same exporter
+(falling back to an even split if none of them have any events in yet).
+Exact in the common case of one exporter per pipeline; an approximation,
+not a measurement error, once pipelines fan out to the same
+destinations.
+
 **Unlike `/config`, `/logs` is not redacted** -- it's the actual
 converted log record content (body, attributes, resource) for whatever
 pipelines have a `logbuffer` exporter attached. `/config` only ever

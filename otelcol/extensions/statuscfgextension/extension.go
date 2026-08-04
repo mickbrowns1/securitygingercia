@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"time"
@@ -119,18 +120,7 @@ func (e *statusCfgExtension) buildSnapshot() (MetricsSnapshot, error) {
 		}
 	}
 
-	pipelines := make(map[string]PipelineSnapshot, len(e.resolved.pipelines))
-	for name, topo := range e.resolved.pipelines {
-		var in, out, dropped uint64
-		for _, r := range topo.Receivers {
-			in += acceptedLog[r]
-		}
-		for _, x := range topo.Exporters {
-			out += sentLog[x]
-			dropped += failedLog[x]
-		}
-		pipelines[name] = PipelineSnapshot{EventsIn: in, EventsOut: out, EventsDropped: dropped}
-	}
+	pipelines := computePipelineSnapshots(e.resolved.pipelines, acceptedLog, sentLog, failedLog)
 
 	return MetricsSnapshot{
 		StartedAt:     e.startedAt,
@@ -139,6 +129,67 @@ func (e *statusCfgExtension) buildSnapshot() (MetricsSnapshot, error) {
 		Pipelines:     pipelines,
 		Exporters:     exporters,
 	}, nil
+}
+
+// computePipelineSnapshots derives each pipeline's events_out/events_dropped
+// from per-exporter Prometheus counters that are only ever labeled by
+// exporter, never by (pipeline, exporter) -- OTel's default telemetry has
+// no such breakdown. That's exact for an exporter used by exactly one
+// pipeline, but naively summing sentLog/failedLog per exporter for every
+// pipeline that references it (the original approach) massively
+// overcounts once an exporter is shared: a pipeline with zero real
+// traffic would still report the exporter's *entire* global total just
+// because it's wired to the same shared exporter as a busy pipeline.
+//
+// Instead, each exporter's global total is split across the pipelines
+// that use it, weighted by each pipeline's own events_in share of the
+// combined events_in of every pipeline sharing that exporter (falling
+// back to an even split if none of them have any events in yet). Still
+// an approximation -- there's no way to get the true per-pipeline number
+// from this telemetry -- but it no longer redundantly attributes a
+// shared exporter's full volume to pipelines that didn't produce it.
+func computePipelineSnapshots(pipelines map[string]pipelineTopology, acceptedLog, sentLog, failedLog map[string]uint64) map[string]PipelineSnapshot {
+	pipelineIn := make(map[string]uint64, len(pipelines))
+	for name, topo := range pipelines {
+		var in uint64
+		for _, r := range topo.Receivers {
+			in += acceptedLog[r]
+		}
+		pipelineIn[name] = in
+	}
+
+	pipelineOut := make(map[string]float64, len(pipelines))
+	pipelineDropped := make(map[string]float64, len(pipelines))
+	exporterUsers := make(map[string][]string)
+	for name, topo := range pipelines {
+		for _, x := range topo.Exporters {
+			exporterUsers[x] = append(exporterUsers[x], name)
+		}
+	}
+	for exporterID, users := range exporterUsers {
+		var totalIn uint64
+		for _, name := range users {
+			totalIn += pipelineIn[name]
+		}
+		for _, name := range users {
+			share := 1.0 / float64(len(users))
+			if totalIn > 0 {
+				share = float64(pipelineIn[name]) / float64(totalIn)
+			}
+			pipelineOut[name] += share * float64(sentLog[exporterID])
+			pipelineDropped[name] += share * float64(failedLog[exporterID])
+		}
+	}
+
+	out := make(map[string]PipelineSnapshot, len(pipelines))
+	for name := range pipelines {
+		out[name] = PipelineSnapshot{
+			EventsIn:      pipelineIn[name],
+			EventsOut:     uint64(math.Round(pipelineOut[name])),
+			EventsDropped: uint64(math.Round(pipelineDropped[name])),
+		}
+	}
+	return out
 }
 
 func (e *statusCfgExtension) handleTopology(w http.ResponseWriter, _ *http.Request) {
