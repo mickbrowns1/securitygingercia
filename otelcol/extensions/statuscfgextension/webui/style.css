@@ -292,8 +292,12 @@ main { padding: 20px; max-width: 1100px; margin: 0 auto; }
 
 .topology-graph {
   display: grid;
-  grid-template-columns: 1fr 1.4fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 1fr);
   gap: 24px;
+}
+
+.topology-col {
+  min-width: 0; /* lets this column shrink below its content's natural width instead of overflowing the grid */
 }
 
 .topology-col h3 {
@@ -310,6 +314,7 @@ main { padding: 20px; max-width: 1100px; margin: 0 auto; }
   padding: 8px 10px;
   margin-bottom: 8px;
   font-size: 13px;
+  overflow-wrap: anywhere; /* long ids like splunk_hec/sentinelone wrap instead of forcing the column wider */
 }
 
 .topo-pipeline {
