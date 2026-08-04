@@ -82,13 +82,14 @@
     return s + "s";
   }
 
-  // volBarStyle renders relative volume (this row's count against the
-  // busiest row in the same table) as a subtle background gradient --
-  // a cheap, layout-free stand-in for a real bar chart, using data
-  // that's already being polled for the numbers themselves.
-  function volBarStyle(value, max) {
+  // volCell renders an explicit visible bar (not just a background
+  // tint -- that was tried first and was too subtle to notice in
+  // practice) showing this row's count relative to the busiest row in
+  // the same table, with the number right above it.
+  function volCell(value, max) {
     var pct = max > 0 ? Math.round((value / max) * 100) : 0;
-    return ' style="background: linear-gradient(to right, var(--vol-bar) ' + pct + '%, transparent ' + pct + '%)"';
+    return '<td class="numeric vol-cell"><span class="vol-number">' + value + '</span>' +
+      '<span class="vol-track"><span class="vol-fill" style="width:' + pct + '%"></span></span></td>';
   }
 
   function renderPipelines(pipelines) {
@@ -97,8 +98,8 @@
     names.forEach(function (n) { max = Math.max(max, pipelines[n].events_in || 0); });
     var rows = names.map(function (name) {
       var p = pipelines[name];
-      return "<tr" + volBarStyle(p.events_in, max) + "><td>" + escapeHTML(name) + "</td><td class=\"numeric\">" + p.events_in +
-        "</td><td class=\"numeric\">" + p.events_out + "</td><td class=\"numeric\">" + p.events_dropped + "</td></tr>";
+      return "<tr><td>" + escapeHTML(name) + "</td>" + volCell(p.events_in, max) +
+        "<td class=\"numeric\">" + p.events_out + "</td><td class=\"numeric\">" + p.events_dropped + "</td></tr>";
     });
     $("pipelines-body").innerHTML = rows.join("") || emptyRow(4);
   }
@@ -109,7 +110,7 @@
     ids.forEach(function (id) { max = Math.max(max, receivers[id].events_in || 0); });
     var rows = ids.map(function (id) {
       var v = receivers[id].events_in || 0;
-      return "<tr" + volBarStyle(v, max) + "><td>" + escapeHTML(id) + "</td><td class=\"numeric\">" + v + "</td></tr>";
+      return "<tr><td>" + escapeHTML(id) + "</td>" + volCell(v, max) + "</tr>";
     });
     $("receivers-body").innerHTML = rows.join("") || emptyRow(2);
   }
@@ -120,8 +121,8 @@
     ids.forEach(function (id) { max = Math.max(max, exporters[id].events_in || 0); });
     var rows = ids.map(function (id) {
       var e = exporters[id];
-      return "<tr" + volBarStyle(e.events_in, max) + "><td>" + escapeHTML(id) + "</td><td class=\"numeric\">" + e.events_in +
-        "</td><td class=\"numeric\">" + e.batches_sent + "</td><td class=\"numeric\">" + e.batches_failed + "</td></tr>";
+      return "<tr><td>" + escapeHTML(id) + "</td>" + volCell(e.events_in, max) +
+        "<td class=\"numeric\">" + e.batches_sent + "</td><td class=\"numeric\">" + e.batches_failed + "</td></tr>";
     });
     $("exporters-body").innerHTML = rows.join("") || emptyRow(4);
   }
