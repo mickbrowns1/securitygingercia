@@ -10,6 +10,7 @@
     logsTimer: null,
     healthTimer: null,
     corrFilter: null, // { key, value } | null -- set by clicking an attribute badge in the Logs view
+    lastLogEntries: [], // whatever /logs last returned -- Export downloads exactly this, filters and all
   };
 
   function $(id) { return document.getElementById(id); }
@@ -242,12 +243,64 @@
     var path = "logs" + (params.toString() ? "?" + params.toString() : "");
     fetchJSON(path).then(function (entries) {
       setConnStatus(true);
+      state.lastLogEntries = entries;
       updateSeverityOptions(entries);
       renderLogs(entries);
     }).catch(function (err) { setConnStatus(false, err.message); });
   }
 
+  // Downloads exactly what's currently shown (whatever query/severity/
+  // correlation filter is active) as a JSON file -- e.g. to attach to a
+  // ticket or hand to a colleague without them needing access to this
+  // collector's web UI at all.
+  function exportLogs() {
+    var data = JSON.stringify(state.lastLogEntries, null, 2);
+    var blob = new Blob([data], { type: "application/json" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = "sgcia-logs-" + new Date().toISOString().replace(/[:.]/g, "-") + ".json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  // Clears the buffer server-side (DELETE /logs) -- shared state, so
+  // this affects every viewer of this collector's web UI, not just
+  // whoever clicked it. Confirmed for exactly that reason.
+  function clearLogBuffer() {
+    if (!confirm("Clear the entire log buffer? This affects everyone viewing this collector, not just you.")) return;
+    fetch("logs", { method: "DELETE" }).then(function (resp) {
+      if (!resp.ok) throw new Error(resp.status + " " + resp.statusText);
+      setConnStatus(true);
+      loadLogs();
+    }).catch(function (err) { setConnStatus(false, err.message); });
+  }
+
+  // Cycles through currently-rendered ERROR/FATAL rows (n = forward,
+  // p = backward), highlighting and scrolling to each in turn. Recomputed
+  // from the live DOM on every call rather than cached, since the table
+  // can be replaced by the next auto-refresh at any moment -- losing the
+  // current position across a refresh (falling back to "start from the
+  // top") is an acceptable tradeoff for not tracking stale rows.
+  function jumpToError(direction) {
+    var rows = Array.prototype.slice.call(document.querySelectorAll("#logs-body tr"));
+    var errorRows = rows.filter(function (r) { return r.querySelector(".sev-error, .sev-fatal"); });
+    if (errorRows.length === 0) return;
+    var currentIndex = errorRows.findIndex(function (r) { return r.classList.contains("nav-highlight"); });
+    errorRows.forEach(function (r) { r.classList.remove("nav-highlight"); });
+    var nextIndex = currentIndex === -1
+      ? (direction > 0 ? 0 : errorRows.length - 1)
+      : (currentIndex + direction + errorRows.length) % errorRows.length;
+    var target = errorRows[nextIndex];
+    target.classList.add("nav-highlight");
+    target.scrollIntoView({ block: "nearest" });
+  }
+
   $("logs-refresh").addEventListener("click", loadLogs);
+  $("logs-export").addEventListener("click", exportLogs);
+  $("logs-clear").addEventListener("click", clearLogBuffer);
   $("logs-query").addEventListener("keydown", function (ev) {
     if (ev.key !== "Enter") return;
     state.corrFilter = null;
@@ -311,6 +364,54 @@
       renderTopology(graph);
     }).catch(function (err) { setConnStatus(false, err.message); });
   }
+
+  // ---- Keyboard shortcuts ----
+
+  function isTypingTarget(el) {
+    return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT");
+  }
+
+  function helpVisible() { return $("help-overlay").style.display !== "none"; }
+  function showHelp() { $("help-overlay").style.display = "flex"; }
+  function hideHelp() { $("help-overlay").style.display = "none"; }
+  function toggleHelp() { helpVisible() ? hideHelp() : showHelp(); }
+
+  $("help-overlay").addEventListener("click", function (ev) {
+    if (ev.target.id === "help-overlay") hideHelp();
+  });
+
+  document.addEventListener("keydown", function (ev) {
+    var typing = isTypingTarget(document.activeElement);
+
+    if (ev.key === "?" && !typing) {
+      ev.preventDefault();
+      toggleHelp();
+      return;
+    }
+
+    if (ev.key === "Escape") {
+      if (helpVisible()) { hideHelp(); return; }
+      if (typing) document.activeElement.blur();
+      if (state.corrFilter || $("logs-query").value) {
+        state.corrFilter = null;
+        $("logs-query").value = "";
+        updateCorrChip();
+        if (state.activeView === "logs") loadLogs();
+      }
+      return;
+    }
+
+    if (helpVisible() || typing) return;
+
+    if (ev.key === "/") {
+      ev.preventDefault();
+      $("logs-query").focus();
+    } else if (ev.key === "h" || ev.key === "l" || ev.key === "t") {
+      switchView({ h: "health", l: "logs", t: "topology" }[ev.key]);
+    } else if ((ev.key === "n" || ev.key === "p") && state.activeView === "logs") {
+      jumpToError(ev.key === "n" ? 1 : -1);
+    }
+  });
 
   // ---- Polling ----
 

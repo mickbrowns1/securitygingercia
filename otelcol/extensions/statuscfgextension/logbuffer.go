@@ -50,6 +50,17 @@ func (b *logBuffer) Push(entries []LogEntry) {
 	}
 }
 
+// Clear discards every buffered entry -- backs the web UI's "Clear
+// buffer" action (DELETE /logs). Shared, server-side state: this
+// affects every viewer of the web UI, not just whoever clicked it.
+func (b *logBuffer) Clear() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.entries = make([]LogEntry, logBufferCapacity)
+	b.next = 0
+	b.full = false
+}
+
 // Snapshot returns entries in chronological order (oldest first),
 // optionally filtered by any combination of: a case-insensitive
 // substring match against the body/attributes/resource (query), an

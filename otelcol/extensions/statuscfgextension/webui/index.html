@@ -14,6 +14,7 @@
     <button class="tab-btn" data-view="logs">Logs</button>
     <button class="tab-btn" data-view="topology">Topology</button>
   </nav>
+  <span class="help-hint">press <kbd>?</kbd> for shortcuts</span>
 </header>
 
 <main>
@@ -55,6 +56,8 @@
           <option value="">All severities</option>
         </select>
         <button id="logs-refresh">Refresh</button>
+        <button id="logs-export">Export</button>
+        <button id="logs-clear" class="danger-btn">Clear buffer</button>
         <label class="autorefresh"><input type="checkbox" id="logs-autorefresh" checked> Auto-refresh</label>
       </div>
       <div id="corr-chip" class="corr-chip" style="display:none"></div>
@@ -79,6 +82,19 @@
 <footer>
   <span id="conn-status">connecting...</span>
 </footer>
+
+<div id="help-overlay" class="help-overlay" style="display:none">
+  <div class="help-panel">
+    <h2>Keyboard shortcuts</h2>
+    <table>
+      <tr><td><kbd>h</kbd> <kbd>l</kbd> <kbd>t</kbd></td><td>Jump to Health / Logs / Topology</td></tr>
+      <tr><td><kbd>/</kbd></td><td>Focus the log search box</td></tr>
+      <tr><td><kbd>n</kbd> <kbd>p</kbd></td><td>Next / previous ERROR entry (Logs tab)</td></tr>
+      <tr><td><kbd>?</kbd></td><td>Show / hide this help</td></tr>
+      <tr><td><kbd>Esc</kbd></td><td>Clear search/filter, or close this help</td></tr>
+    </table>
+  </div>
+</div>
 
 <script src="app.js"></script>
 </body>

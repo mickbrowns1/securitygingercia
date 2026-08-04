@@ -736,6 +736,9 @@ the security boundary):
   has a `logbuffer` exporter (see [Available
   components](#available-components) and [The web UI](#the-web-ui)
   below) -- nothing is captured otherwise.
+- `DELETE /logs` -- clears the buffer (204, empty body). Shared,
+  server-side state: this affects every viewer of the web UI, not just
+  whoever called it. Powers the web UI's "Clear buffer" button.
 - `GET /` -- the embedded web UI itself (see [The web UI](#the-web-ui)).
 
 ```console
@@ -793,12 +796,23 @@ no separate process, no build step, no Node. Three views:
   renders as a clickable badge -- click one to filter the view to only
   other events sharing that exact key=value, a quick way to answer
   "what else happened on this host/session?" without typing a query.
-  Empty until at least one pipeline has a `logbuffer` exporter attached
-  (see [Available components](#available-components) above) -- add one
-  via `sgcia edit` or by hand, same as any other exporter.
+  **Export** downloads whatever's currently shown (query, severity, and
+  correlation filter all included) as a JSON file. **Clear buffer**
+  empties it via `DELETE /logs` -- shared state, so this affects every
+  viewer, not just whoever clicked it (confirmed before it happens for
+  exactly that reason). Empty until at least one pipeline has a
+  `logbuffer` exporter attached (see [Available
+  components](#available-components) above) -- add one via `sgcia edit`
+  or by hand, same as any other exporter.
 - **Topology** -- a receiver → pipeline → exporter diagram built from
   `/topology`, so it's easy to see at a glance which destinations each
   input actually feeds, especially once a config has several pipelines.
+
+Keyboard shortcuts (press `?` anywhere in the UI for a reminder): `h`/
+`l`/`t` jump to Health/Logs/Topology, `/` focuses the Logs search box,
+`n`/`p` jump to the next/previous ERROR entry in the Logs table, and
+`Esc` clears the current search/correlation filter (or closes the `?`
+overlay if it's open).
 
 This is a read-only companion to `sgcia dashboard`/`sgcia edit`, not a
 replacement -- the TUIs still work exactly as before, and the web UI is

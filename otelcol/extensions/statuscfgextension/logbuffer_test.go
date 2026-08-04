@@ -9,6 +9,32 @@ func entry(body, severity string, attrs, resource map[string]string) LogEntry {
 	return LogEntry{Timestamp: time.Now(), Severity: severity, Body: body, Attributes: attrs, Resource: resource}
 }
 
+func TestLogBuffer_ClearDiscardsEverything(t *testing.T) {
+	b := newLogBuffer()
+	b.Push([]LogEntry{entry("a", "INFO", nil, nil), entry("b", "INFO", nil, nil)})
+	if len(b.Snapshot("", "", "", "")) != 2 {
+		t.Fatal("setup: expected 2 entries before Clear")
+	}
+
+	b.Clear()
+
+	if got := b.Snapshot("", "", "", ""); len(got) != 0 {
+		t.Fatalf("got %+v, want empty after Clear", got)
+	}
+}
+
+func TestLogBuffer_ClearThenPushStartsCleanNotStale(t *testing.T) {
+	b := newLogBuffer()
+	b.Push([]LogEntry{entry("stale", "INFO", nil, nil)})
+	b.Clear()
+	b.Push([]LogEntry{entry("fresh", "INFO", nil, nil)})
+
+	got := b.Snapshot("", "", "", "")
+	if len(got) != 1 || got[0].Body != "fresh" {
+		t.Fatalf("got %+v, want only [fresh] -- no leftover entries from before Clear", got)
+	}
+}
+
 func TestLogBuffer_SnapshotWithNoFiltersReturnsEverythingInOrder(t *testing.T) {
 	b := newLogBuffer()
 	b.Push([]LogEntry{entry("first", "INFO", nil, nil), entry("second", "INFO", nil, nil)})

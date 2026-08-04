@@ -67,3 +67,65 @@ func TestExtension_StatusAndConfigEndToEnd(t *testing.T) {
 		t.Errorf("token = %v, want ***redacted***", s1["token"])
 	}
 }
+
+func TestExtension_LogsGetAndDeleteEndToEnd(t *testing.T) {
+	configPath := writeTempConfig(t, sampleYAML)
+	metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(samplePromText))
+	}))
+	defer metrics.Close()
+
+	cfg := &Config{Endpoint: "127.0.0.1:0", ConfigPath: configPath, MetricsURL: metrics.URL}
+	ext := newStatusCfgExtension(cfg, zap.NewNop())
+	if err := ext.Start(context.Background(), nil); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer ext.Shutdown(context.Background())
+
+	ext.buffer.Push([]LogEntry{{Body: "hello"}})
+
+	addr := ext.listenerAddr()
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	getResp, err := client.Get("http://" + addr + "/logs")
+	if err != nil {
+		t.Fatalf("GET /logs: %v", err)
+	}
+	var entries []LogEntry
+	json.NewDecoder(getResp.Body).Decode(&entries)
+	getResp.Body.Close()
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries before clear, want 1", len(entries))
+	}
+
+	delReq, _ := http.NewRequest(http.MethodDelete, "http://"+addr+"/logs", nil)
+	delResp, err := client.Do(delReq)
+	if err != nil {
+		t.Fatalf("DELETE /logs: %v", err)
+	}
+	delResp.Body.Close()
+	if delResp.StatusCode != http.StatusNoContent {
+		t.Errorf("DELETE /logs status = %d, want 204", delResp.StatusCode)
+	}
+
+	getResp2, err := client.Get("http://" + addr + "/logs")
+	if err != nil {
+		t.Fatalf("GET /logs after clear: %v", err)
+	}
+	var afterClear []LogEntry
+	json.NewDecoder(getResp2.Body).Decode(&afterClear)
+	getResp2.Body.Close()
+	if len(afterClear) != 0 {
+		t.Fatalf("got %d entries after clear, want 0", len(afterClear))
+	}
+
+	putReq, _ := http.NewRequest(http.MethodPut, "http://"+addr+"/logs", nil)
+	putResp, err := client.Do(putReq)
+	if err != nil {
+		t.Fatalf("PUT /logs: %v", err)
+	}
+	putResp.Body.Close()
+	if putResp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("PUT /logs status = %d, want 405", putResp.StatusCode)
+	}
+}

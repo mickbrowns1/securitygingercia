@@ -57,6 +57,22 @@ nav { display: flex; gap: 4px; }
   color: var(--accent);
 }
 
+.help-hint {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+kbd {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--text);
+}
+
 main { padding: 20px; max-width: 1100px; margin: 0 auto; }
 
 .view { display: none; }
@@ -154,6 +170,11 @@ main { padding: 20px; max-width: 1100px; margin: 0 auto; }
   padding: 6px 10px;
   border-radius: 6px;
   cursor: pointer;
+}
+
+.logs-toolbar .danger-btn:hover {
+  border-color: var(--err);
+  color: var(--err);
 }
 
 .autorefresh {
@@ -298,3 +319,36 @@ footer {
 
 #conn-status.ok::before { content: "\25cf "; color: var(--ok); }
 #conn-status.err::before { content: "\25cf "; color: var(--err); }
+
+.help-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.help-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 24px 32px;
+  min-width: 320px;
+}
+
+.help-panel h2 {
+  margin: 0 0 16px 0;
+  font-size: 14px;
+  color: var(--accent);
+}
+
+.help-panel table { border-collapse: collapse; }
+.help-panel td { padding: 6px 12px; font-size: 13px; }
+.help-panel td:first-child { white-space: nowrap; text-align: right; }
+.help-panel td:last-child { color: var(--muted); }
+
+.logs-table tr.nav-highlight {
+  background: rgba(224, 96, 94, 0.18);
+}

@@ -44,7 +44,7 @@ func (e *statusCfgExtension) Start(_ context.Context, _ component.Host) error {
 	mux.HandleFunc("/status", e.handleStatus)
 	mux.HandleFunc("/config", e.handleConfig)
 	mux.HandleFunc("/topology", e.handleTopology)
-	mux.HandleFunc("/logs", e.handleGetLogs)
+	mux.HandleFunc("/logs", e.handleLogs)
 	mux.HandleFunc("/internal/logs", e.handleIngestLogs)
 	mux.Handle("/", webUIHandler())
 	e.server = &http.Server{Handler: mux}
@@ -145,6 +145,20 @@ func (e *statusCfgExtension) handleTopology(w http.ResponseWriter, _ *http.Reque
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(e.resolved.buildTopology()); err != nil {
 		e.logger.Error("statuscfg: encoding /topology response", zap.Error(err))
+	}
+}
+
+// handleLogs dispatches GET (read the buffer) and DELETE (clear it --
+// the web UI's "Clear buffer" action) on the same /logs route.
+func (e *statusCfgExtension) handleLogs(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		e.handleGetLogs(w, r)
+	case http.MethodDelete:
+		e.buffer.Clear()
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
