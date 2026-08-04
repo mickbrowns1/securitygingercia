@@ -263,6 +263,7 @@ exporters:
 extensions:
   file_storage:
     directory: /var/lib/sgcia/otelcol-storage
+    create_directory: true
 service:
   extensions: [file_storage]
   pipelines:
@@ -408,6 +409,21 @@ service:
             .is_empty());
     }
 
+    /// `cargo test` runs test binaries with cwd set to this crate's own
+    /// manifest directory (crates/collector), not the workspace root, so
+    /// production `otelcol_binary_path()`'s plain relative
+    /// "otelcol/dist/..." check (correct for *real* runtime use, where
+    /// baking in a build-machine absolute path would be wrong) never
+    /// resolves under `cargo test` -- anchor to CARGO_MANIFEST_DIR
+    /// (valid here since tests only ever run from the same checkout that
+    /// built them) instead, just for this test.
+    fn test_otelcol_binary_path() -> PathBuf {
+        if let Ok(p) = std::env::var("SGCIA_OTELCOL_BIN") {
+            return PathBuf::from(p);
+        }
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../otelcol/dist/sgcia-otelcol")
+    }
+
     /// Real integration coverage for `validate`/`save`, gated on the OCB-
     /// built binary actually existing (it's a separate build step, not
     /// part of `cargo test`) so this degrades to a skip rather than a
@@ -415,7 +431,7 @@ service:
     /// builder-config.yaml` yet.
     #[test]
     fn validate_accepts_a_well_formed_document_against_the_real_binary() {
-        let bin = otelcol_binary_path();
+        let bin = test_otelcol_binary_path();
         if !bin.exists() {
             eprintln!("skipping: {} not built (see otelcol/README)", bin.display());
             return;

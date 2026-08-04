@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>sgcia collector</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>sgcia collector</h1>
+  <nav>
+    <button class="tab-btn active" data-view="health">Health</button>
+    <button class="tab-btn" data-view="logs">Logs</button>
+    <button class="tab-btn" data-view="topology">Topology</button>
+  </nav>
+</header>
+
+<main>
+  <section id="view-health" class="view active">
+    <div class="panel">
+      <h2>Overview</h2>
+      <div id="health-summary" class="summary-grid"></div>
+    </div>
+    <div class="panel">
+      <h2>Pipelines</h2>
+      <table class="data-table">
+        <thead><tr><th>Pipeline</th><th>Events in</th><th>Events out</th><th>Dropped</th></tr></thead>
+        <tbody id="pipelines-body"></tbody>
+      </table>
+    </div>
+    <div class="panel-row">
+      <div class="panel">
+        <h2>Receivers</h2>
+        <table class="data-table">
+          <thead><tr><th>Receiver</th><th>Events in</th></tr></thead>
+          <tbody id="receivers-body"></tbody>
+        </table>
+      </div>
+      <div class="panel">
+        <h2>Exporters</h2>
+        <table class="data-table">
+          <thead><tr><th>Exporter</th><th>Events in</th><th>Batches sent</th><th>Batches failed</th></tr></thead>
+          <tbody id="exporters-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-logs" class="view">
+    <div class="panel">
+      <div class="logs-toolbar">
+        <input id="logs-query" type="text" placeholder="Search body / attributes / resource...">
+        <select id="logs-severity">
+          <option value="">All severities</option>
+        </select>
+        <button id="logs-refresh">Refresh</button>
+        <label class="autorefresh"><input type="checkbox" id="logs-autorefresh" checked> Auto-refresh</label>
+      </div>
+      <div id="logs-empty" class="empty-state" style="display:none">
+        No log records yet. Add a <code>logbuffer</code> exporter to a logs pipeline to see events here.
+      </div>
+      <table class="data-table logs-table">
+        <thead><tr><th>Time</th><th>Severity</th><th>Body</th><th>Attributes</th></tr></thead>
+        <tbody id="logs-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="view-topology" class="view">
+    <div class="panel">
+      <h2>Pipeline topology</h2>
+      <div id="topology-graph" class="topology-graph"></div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <span id="conn-status">connecting...</span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

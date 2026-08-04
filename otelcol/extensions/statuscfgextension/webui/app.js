@@ -1,0 +1,261 @@
+(function () {
+  "use strict";
+
+  var HEALTH_POLL_MS = 5000;
+  var LOGS_POLL_MS = 4000;
+
+  var state = {
+    activeView: "health",
+    knownSeverities: new Set(),
+    logsTimer: null,
+    healthTimer: null,
+  };
+
+  function $(id) { return document.getElementById(id); }
+
+  function setConnStatus(ok, detail) {
+    var el = $("conn-status");
+    el.className = ok ? "ok" : "err";
+    el.textContent = ok ? "connected" : "connection error: " + detail;
+  }
+
+  function fetchJSON(path) {
+    return fetch(path, { cache: "no-store" }).then(function (resp) {
+      if (!resp.ok) throw new Error(resp.status + " " + resp.statusText);
+      return resp.json();
+    });
+  }
+
+  function escapeHTML(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  // ---- Tabs ----
+
+  function switchView(view) {
+    state.activeView = view;
+    document.querySelectorAll(".tab-btn").forEach(function (btn) {
+      btn.classList.toggle("active", btn.dataset.view === view);
+    });
+    document.querySelectorAll(".view").forEach(function (section) {
+      section.classList.toggle("active", section.id === "view-" + view);
+    });
+    if (view === "health") loadHealth();
+    if (view === "logs") loadLogs();
+    if (view === "topology") loadTopology();
+  }
+
+  document.querySelectorAll(".tab-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () { switchView(btn.dataset.view); });
+  });
+
+  // ---- Health view ----
+
+  function renderSummary(snapshot) {
+    var uptime = formatUptime(snapshot.uptime_seconds);
+    var receiverCount = Object.keys(snapshot.receivers || {}).length;
+    var pipelineCount = Object.keys(snapshot.pipelines || {}).length;
+    var exporterCount = Object.keys(snapshot.exporters || {}).length;
+    var items = [
+      ["Uptime", uptime],
+      ["Receivers", receiverCount],
+      ["Pipelines", pipelineCount],
+      ["Exporters", exporterCount],
+    ];
+    $("health-summary").innerHTML = items.map(function (pair) {
+      return '<div class="summary-item"><div class="label">' + escapeHTML(pair[0]) +
+        '</div><div class="value">' + escapeHTML(pair[1]) + "</div></div>";
+    }).join("");
+  }
+
+  function formatUptime(seconds) {
+    seconds = seconds || 0;
+    var h = Math.floor(seconds / 3600);
+    var m = Math.floor((seconds % 3600) / 60);
+    var s = seconds % 60;
+    if (h > 0) return h + "h " + m + "m";
+    if (m > 0) return m + "m " + s + "s";
+    return s + "s";
+  }
+
+  function renderPipelines(pipelines) {
+    var rows = Object.keys(pipelines || {}).sort().map(function (name) {
+      var p = pipelines[name];
+      return "<tr><td>" + escapeHTML(name) + "</td><td class=\"numeric\">" + p.events_in +
+        "</td><td class=\"numeric\">" + p.events_out + "</td><td class=\"numeric\">" + p.events_dropped + "</td></tr>";
+    });
+    $("pipelines-body").innerHTML = rows.join("") || emptyRow(4);
+  }
+
+  function renderReceivers(receivers) {
+    var rows = Object.keys(receivers || {}).sort().map(function (id) {
+      return "<tr><td>" + escapeHTML(id) + "</td><td class=\"numeric\">" + receivers[id].events_in + "</td></tr>";
+    });
+    $("receivers-body").innerHTML = rows.join("") || emptyRow(2);
+  }
+
+  function renderExporters(exporters) {
+    var rows = Object.keys(exporters || {}).sort().map(function (id) {
+      var e = exporters[id];
+      return "<tr><td>" + escapeHTML(id) + "</td><td class=\"numeric\">" + e.events_in +
+        "</td><td class=\"numeric\">" + e.batches_sent + "</td><td class=\"numeric\">" + e.batches_failed + "</td></tr>";
+    });
+    $("exporters-body").innerHTML = rows.join("") || emptyRow(4);
+  }
+
+  function emptyRow(cols) {
+    return '<tr><td colspan="' + cols + '" style="color:var(--muted)">no data yet</td></tr>';
+  }
+
+  function loadHealth() {
+    fetchJSON("status").then(function (snapshot) {
+      setConnStatus(true);
+      renderSummary(snapshot);
+      renderPipelines(snapshot.pipelines);
+      renderReceivers(snapshot.receivers);
+      renderExporters(snapshot.exporters);
+    }).catch(function (err) { setConnStatus(false, err.message); });
+  }
+
+  // ---- Logs view ----
+
+  function severityClass(sev) {
+    var s = (sev || "").toLowerCase();
+    if (s.indexOf("err") !== -1 || s.indexOf("fatal") !== -1) return "sev-error";
+    if (s.indexOf("warn") !== -1) return "sev-warn";
+    if (s.indexOf("info") !== -1) return "sev-info";
+    if (s.indexOf("debug") !== -1) return "sev-debug";
+    if (s.indexOf("trace") !== -1) return "sev-trace";
+    return "sev-info";
+  }
+
+  function updateSeverityOptions(entries) {
+    var select = $("logs-severity");
+    var current = select.value;
+    var changed = false;
+    entries.forEach(function (e) {
+      if (e.severity && !state.knownSeverities.has(e.severity)) {
+        state.knownSeverities.add(e.severity);
+        changed = true;
+      }
+    });
+    if (!changed) return;
+    var sevs = Array.from(state.knownSeverities).sort();
+    select.innerHTML = '<option value="">All severities</option>' + sevs.map(function (s) {
+      return '<option value="' + escapeHTML(s) + '">' + escapeHTML(s) + "</option>";
+    }).join("");
+    select.value = current;
+  }
+
+  function renderAttrs(entry) {
+    var parts = [];
+    if (entry.attributes) {
+      Object.keys(entry.attributes).forEach(function (k) {
+        parts.push(escapeHTML(k) + "=" + escapeHTML(entry.attributes[k]));
+      });
+    }
+    if (entry.resource) {
+      Object.keys(entry.resource).forEach(function (k) {
+        parts.push(escapeHTML(k) + "=" + escapeHTML(entry.resource[k]));
+      });
+    }
+    return parts.join(", ");
+  }
+
+  function renderLogs(entries) {
+    $("logs-empty").style.display = entries.length === 0 ? "block" : "none";
+    var rows = entries.slice().reverse().map(function (e) {
+      var t = e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : "";
+      return "<tr><td>" + escapeHTML(t) + '</td><td><span class="sev-badge ' + severityClass(e.severity) +
+        '">' + escapeHTML(e.severity || "") + '</span></td><td class="body-cell">' + escapeHTML(e.body) +
+        '</td><td class="attrs-cell">' + renderAttrs(e) + "</td></tr>";
+    });
+    $("logs-body").innerHTML = rows.join("");
+  }
+
+  function loadLogs() {
+    var q = $("logs-query").value.trim();
+    var severity = $("logs-severity").value;
+    var params = new URLSearchParams();
+    if (q) params.set("q", q);
+    if (severity) params.set("severity", severity);
+    var path = "logs" + (params.toString() ? "?" + params.toString() : "");
+    fetchJSON(path).then(function (entries) {
+      setConnStatus(true);
+      updateSeverityOptions(entries);
+      renderLogs(entries);
+    }).catch(function (err) { setConnStatus(false, err.message); });
+  }
+
+  $("logs-refresh").addEventListener("click", loadLogs);
+  $("logs-query").addEventListener("keydown", function (ev) {
+    if (ev.key === "Enter") loadLogs();
+  });
+  $("logs-severity").addEventListener("change", loadLogs);
+
+  // ---- Topology view ----
+
+  function renderTopology(graph) {
+    var nodesByType = { receiver: [], exporter: [], pipeline: [] };
+    (graph.nodes || []).forEach(function (n) { nodesByType[n.type] && nodesByType[n.type].push(n); });
+
+    var inbound = {}, outbound = {};
+    (graph.edges || []).forEach(function (edge) {
+      var pipelineIsTarget = nodesByType.pipeline.some(function (p) { return p.id === edge.to; });
+      if (pipelineIsTarget) {
+        (inbound[edge.to] = inbound[edge.to] || []).push(edge.from);
+      } else {
+        (outbound[edge.from] = outbound[edge.from] || []).push(edge.to);
+      }
+    });
+
+    var receiversHTML = nodesByType.receiver.map(function (n) {
+      return '<div class="topo-node">' + escapeHTML(n.id) + "</div>";
+    }).join("") || '<div class="topo-node" style="color:var(--muted)">none configured</div>';
+
+    var exportersHTML = nodesByType.exporter.map(function (n) {
+      return '<div class="topo-node">' + escapeHTML(n.id) + "</div>";
+    }).join("") || '<div class="topo-node" style="color:var(--muted)">none configured</div>';
+
+    var pipelinesHTML = nodesByType.pipeline.map(function (n) {
+      var ins = (inbound[n.id] || []).map(function (id) {
+        return '<span class="topo-badge in">' + escapeHTML(id) + "</span>";
+      }).join("");
+      var outs = (outbound[n.id] || []).map(function (id) {
+        return '<span class="topo-badge out">' + escapeHTML(id) + "</span>";
+      }).join("");
+      return '<div class="topo-node topo-pipeline"><div class="pipe-name">' + escapeHTML(n.id) +
+        '</div><div class="topo-badges">' + ins + outs + "</div></div>";
+    }).join("") || '<div class="topo-node" style="color:var(--muted)">none configured</div>';
+
+    $("topology-graph").innerHTML =
+      '<div class="topology-col"><h3>Receivers</h3>' + receiversHTML + "</div>" +
+      '<div class="topology-col"><h3>Pipelines</h3>' + pipelinesHTML + "</div>" +
+      '<div class="topology-col"><h3>Exporters</h3>' + exportersHTML + "</div>";
+  }
+
+  function loadTopology() {
+    fetchJSON("topology").then(function (graph) {
+      setConnStatus(true);
+      renderTopology(graph);
+    }).catch(function (err) { setConnStatus(false, err.message); });
+  }
+
+  // ---- Polling ----
+
+  function startPolling() {
+    clearInterval(state.healthTimer);
+    clearInterval(state.logsTimer);
+    state.healthTimer = setInterval(function () {
+      if (state.activeView === "health") loadHealth();
+    }, HEALTH_POLL_MS);
+    state.logsTimer = setInterval(function () {
+      if (state.activeView === "logs" && $("logs-autorefresh").checked) loadLogs();
+    }, LOGS_POLL_MS);
+  }
+
+  loadHealth();
+  startPolling();
+})();

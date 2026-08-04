@@ -312,6 +312,11 @@ pub struct App {
     pub status_message: Option<String>,
     pub dirty: bool,
     pub should_quit: bool,
+    /// Full-screen keybinding reference, toggled by `?`. Drawn as an
+    /// overlay on top of whatever `screen` currently is, which stays
+    /// untouched underneath -- any key dismisses it and returns exactly
+    /// where you were.
+    pub show_help: bool,
 }
 
 impl App {
@@ -323,7 +328,23 @@ impl App {
             status_message: None,
             dirty: false,
             should_quit: false,
+            show_help: false,
         }
+    }
+
+    /// `?` opens the help overlay from a browsing/list screen, where it
+    /// can't collide with typing a literal `?` into a text field --
+    /// form screens (component/pipeline/operator editing, naming a new
+    /// component) don't intercept it, so `?` types normally there.
+    fn screen_accepts_help_hotkey(&self) -> bool {
+        matches!(
+            self.screen,
+            Screen::TopLevel { .. }
+                | Screen::PickType { .. }
+                | Screen::ConfirmRemove { .. }
+                | Screen::OperatorList { .. }
+                | Screen::OperatorPickType { .. }
+        )
     }
 
     fn map_for(&self, category: ComponentCategory) -> &Map<String, Value> {
@@ -352,6 +373,14 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        if self.show_help {
+            self.show_help = false;
+            return;
+        }
+        if key.code == KeyCode::Char('?') && self.screen_accepts_help_hotkey() {
+            self.show_help = true;
+            return;
+        }
         let screen = std::mem::take(&mut self.screen);
         self.screen = self.handle_key(screen, key);
     }
@@ -709,6 +738,32 @@ service:
         let mut app = App::new(PathBuf::from("x.yaml"), sample_doc());
         app.on_key(key(KeyCode::Char('q')));
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn question_mark_opens_help_from_top_level_and_any_key_dismisses_it() {
+        let mut app = App::new(PathBuf::from("x.yaml"), sample_doc());
+        app.on_key(key(KeyCode::Char('?')));
+        assert!(app.show_help);
+        // The underlying screen must be untouched while help is showing.
+        assert!(matches!(app.screen, Screen::TopLevel { .. }));
+
+        app.on_key(key(KeyCode::Char('z'))); // any key, not specifically Esc
+        assert!(!app.show_help);
+        assert!(matches!(app.screen, Screen::TopLevel { .. }));
+    }
+
+    #[test]
+    fn question_mark_types_literally_into_a_focused_text_field() {
+        let mut app = App::new(PathBuf::from("x.yaml"), sample_doc());
+        app.on_key(key(KeyCode::Char('a'))); // PickType
+        app.on_key(key(KeyCode::Enter)); // pick first receiver type -> NameNewComponent
+        app.on_key(key(KeyCode::Char('?'))); // should type '?', not open help
+        assert!(!app.show_help);
+        match &app.screen {
+            Screen::NameNewComponent { input, .. } => assert_eq!(input.value(), "?"),
+            _ => panic!("expected NameNewComponent"),
+        }
     }
 
     #[test]

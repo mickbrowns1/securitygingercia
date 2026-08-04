@@ -15,6 +15,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .constraints([Constraint::Min(3), Constraint::Length(3)])
         .split(area);
 
+    if app.show_help {
+        draw_help(frame, chunks[0]);
+        draw_status_bar(frame, chunks[1], app);
+        return;
+    }
+
     match &app.screen {
         Screen::TopLevel { tab, selected } => draw_top_level(frame, chunks[0], app, *tab, *selected),
         Screen::PickType { category, selected } => draw_pick_type(frame, chunks[0], *category, *selected),
@@ -104,7 +110,7 @@ fn draw_top_level(frame: &mut Frame, area: Rect, app: &App, tab: TopTab, selecte
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title("a: add  Enter: edit  d: remove  s: save  Tab: switch  q: quit"),
+            .title("a: add  Enter: edit  d: remove  s: save  Tab: switch  ?: help  q: quit"),
     );
     frame.render_widget(list, chunks[1]);
 }
@@ -124,7 +130,7 @@ fn draw_pick_type(frame: &mut Frame, area: Rect, category: ComponentCategory, se
     draw_type_list(
         frame,
         area,
-        "pick a type (Up/Down to move, Enter to confirm, Esc to cancel)",
+        "pick a type (Up/Down to move, Enter to confirm, ? for help, Esc to cancel)",
         schema_registry::types_for(category),
         selected,
     );
@@ -134,7 +140,7 @@ fn draw_operator_pick_type(frame: &mut Frame, area: Rect, selected: usize) {
     draw_type_list(
         frame,
         area,
-        "pick an operator type (Up/Down to move, Enter to confirm, Esc to cancel)",
+        "pick an operator type (Up/Down to move, Enter to confirm, ? for help, Esc to cancel)",
         schema_registry::operator_types(),
         selected,
     );
@@ -267,9 +273,56 @@ fn draw_form(frame: &mut Frame, area: Rect, title: &str, description: &str, form
     );
 }
 
+fn draw_help(frame: &mut Frame, area: Rect) {
+    let heading = |text: &'static str| {
+        Line::from(Span::styled(
+            text,
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ))
+    };
+    let row = |key: &'static str, action: &'static str| {
+        Line::from(vec![
+            Span::styled(format!("{:<24}", key), Style::default().fg(Color::Cyan)),
+            Span::raw(action),
+        ])
+    };
+
+    let lines = vec![
+        heading("Browsing (Receivers / Exporters / Extensions / Pipelines)"),
+        row("Tab/Shift+Tab, Up/Down", "switch tabs, move selection"),
+        row("Enter, a, d/Delete", "edit / add / remove the selected item"),
+        row("s, ?, q/Esc", "save to disk, help, quit"),
+        heading("Editing a component's fields / a pipeline's operators list"),
+        row("Tab/Shift+Tab, Left/Right", "next/prev field, cycle enum/bool"),
+        row("Enter, Esc", "save (or manage operators list) / discard"),
+        row("(operators list) a, Enter, d, Esc", "add / edit / remove / back"),
+        heading("Editing text -- standard tui-input readline bindings"),
+        row("Left/Right, Ctrl+B/F", "move one character"),
+        row("Ctrl+Left/Right, Alt+B/F", "move one word"),
+        row("Home/Ctrl+A, End/Ctrl+E", "start / end of field"),
+        row("Backspace/Ctrl+H, Delete", "delete char before / under cursor"),
+        row("Ctrl+W/Alt+D, Ctrl+Delete", "delete word before / after cursor"),
+        row("Ctrl+K", "delete to end of field"),
+        row("Ctrl+U", "clear the entire field"),
+        row("Ctrl+Y", "paste back the last deleted text"),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "Press any key to close this screen.",
+            Style::default().add_modifier(Modifier::ITALIC),
+        )),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("Keybinding reference"))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
 fn draw_operator_list(frame: &mut Frame, area: Rect, receiver_id: &str, form: &FormState, selected: usize) {
     let block = Block::default().borders(Borders::ALL).title(format!(
-        "operators on {receiver_id} -- a: add  Enter: edit  d: remove  Esc: back"
+        "operators on {receiver_id} -- a: add  Enter: edit  d: remove  ?: help  Esc: back"
     ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -422,6 +475,16 @@ service:
         let content = render_to_string(&app);
         assert!(content.contains("syslog"));
         assert!(content.contains("Listens for syslog messages"));
+    }
+
+    #[test]
+    fn question_mark_shows_the_keybinding_reference() {
+        let mut app = App::new(PathBuf::from("x.yaml"), EditorDoc::new());
+        app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('?')));
+        let content = render_to_string(&app);
+        assert!(content.contains("Keybinding reference"));
+        assert!(content.contains("Ctrl+U"));
+        assert!(content.contains("clear the entire field"));
     }
 
     #[test]

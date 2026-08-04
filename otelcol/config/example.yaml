@@ -3,9 +3,9 @@
 # Validate with:  ./dist/sgcia-otelcol validate --config file:config/example.yaml
 # Run with:       ./dist/sgcia-otelcol         --config file:config/example.yaml
 #
-# Secrets referenced as ${VAR} below (S1_HEC_TOKEN, SPLUNK_HEC_TOKEN) are read
-# from the environment at load time via the built-in env provider -- see
-# README.md for how to supply them.
+# Secrets referenced as ${VAR} below (S1_HEC_TOKEN, SPLUNK_HEC_TOKEN,
+# DATASET_API_KEY) are read from the environment at load time via the
+# built-in env provider -- see README.md for how to supply them.
 #
 # This mirrors the three pipelines in ../../configs/example.yaml (syslog,
 # file, Windows Event Log -> SentinelOne + Splunk HEC), translated to real
@@ -108,6 +108,15 @@ receivers:
         id: add_sourcetype
         field: attributes.sourcetype
         value: "myapp"
+      # datasetexporter (below) routes events by a literal `serverHost`
+      # attribute -- unlike splunkhecexporter, it has no config-driven
+      # attribute-to-metadata mapping, so an `add` operator like this is
+      # the only way to set it per-event without an upstream processor
+      # (which this distribution doesn't use).
+      - type: add
+        id: add_server_host
+        field: attributes.serverHost
+        value: "myapp-host"
 
   windows_event_log/security:
     channel: Security
@@ -154,17 +163,40 @@ exporters:
       num_consumers: 10
       queue_size: 1000
 
+  # SentinelOne Singularity Data Lake (formerly Scalyr/DataSet). Alpha
+  # stability upstream. Unlike splunkhecexporter, this exporter has no
+  # config-driven attribute-to-metadata mapping -- the only routing
+  # metadata it reads is a literal `serverHost` attribute (see the `add`
+  # operator on file_log/app above), checked in this order: the event's
+  # own serverHost attribute, then the resource's serverHost or
+  # host.name, then server_host.server_host below, then (if
+  # use_hostname is true) this collector's own OS hostname.
+  dataset/sdl:
+    dataset_url: https://app.scalyr.com # https://app.eu.scalyr.com for the EU instance
+    api_key: ${DATASET_API_KEY}
+    server_host:
+      use_hostname: true
+
+  # Feeds the web UI's log viewer (part of the statuscfg extension below)
+  # -- POSTs a JSON copy of each log record over loopback to statuscfg's
+  # own /internal/logs route, which keeps them in a small in-memory
+  # ring buffer. Endpoint must match statuscfg.endpoint above. Purely
+  # local visibility, not a real destination -- safe to add to every
+  # logs pipeline alongside the actual exporters.
+  logbuffer:
+    endpoint: http://127.0.0.1:7801
+
 service:
   extensions: [file_storage, health_check, statuscfg]
   pipelines:
     logs/syslog:
       receivers: [syslog/udp, syslog/tcp]
-      exporters: [splunk_hec/sentinelone, splunk_hec/splunk]
+      exporters: [splunk_hec/sentinelone, splunk_hec/splunk, logbuffer]
 
     logs/files:
       receivers: [file_log/app]
-      exporters: [splunk_hec/sentinelone]
+      exporters: [splunk_hec/sentinelone, dataset/sdl, logbuffer]
 
     logs/windows:
       receivers: [windows_event_log/security]
-      exporters: [splunk_hec/sentinelone]
+      exporters: [splunk_hec/sentinelone, logbuffer]

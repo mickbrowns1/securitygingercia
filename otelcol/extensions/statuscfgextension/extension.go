@@ -19,6 +19,7 @@ type statusCfgExtension struct {
 	listener  net.Listener
 	startedAt time.Time
 	resolved  *resolvedConfig
+	buffer    *logBuffer
 }
 
 // listenerAddr returns the actual bound address, useful in tests that ask
@@ -28,7 +29,7 @@ func (e *statusCfgExtension) listenerAddr() string {
 }
 
 func newStatusCfgExtension(cfg *Config, logger *zap.Logger) *statusCfgExtension {
-	return &statusCfgExtension{cfg: cfg, logger: logger}
+	return &statusCfgExtension{cfg: cfg, logger: logger, buffer: newLogBuffer()}
 }
 
 func (e *statusCfgExtension) Start(_ context.Context, _ component.Host) error {
@@ -42,6 +43,10 @@ func (e *statusCfgExtension) Start(_ context.Context, _ component.Host) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", e.handleStatus)
 	mux.HandleFunc("/config", e.handleConfig)
+	mux.HandleFunc("/topology", e.handleTopology)
+	mux.HandleFunc("/logs", e.handleGetLogs)
+	mux.HandleFunc("/internal/logs", e.handleIngestLogs)
+	mux.Handle("/", webUIHandler())
 	e.server = &http.Server{Handler: mux}
 
 	ln, err := net.Listen("tcp", e.cfg.Endpoint)
@@ -134,4 +139,39 @@ func (e *statusCfgExtension) buildSnapshot() (MetricsSnapshot, error) {
 		Pipelines:     pipelines,
 		Exporters:     exporters,
 	}, nil
+}
+
+func (e *statusCfgExtension) handleTopology(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(e.resolved.buildTopology()); err != nil {
+		e.logger.Error("statuscfg: encoding /topology response", zap.Error(err))
+	}
+}
+
+// handleGetLogs serves the current contents of the in-memory log
+// buffer (empty if no pipeline includes a logbuffer exporter), optionally
+// filtered by ?q=<substring> and/or ?severity=<exact match>.
+func (e *statusCfgExtension) handleGetLogs(w http.ResponseWriter, r *http.Request) {
+	entries := e.buffer.Snapshot(r.URL.Query().Get("q"), r.URL.Query().Get("severity"))
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(entries); err != nil {
+		e.logger.Error("statuscfg: encoding /logs response", zap.Error(err))
+	}
+}
+
+// handleIngestLogs is the receiving end of the logbuffer exporter's own
+// POST -- loopback-only, like every other route here, so this is only
+// reachable by something already running on the same machine.
+func (e *statusCfgExtension) handleIngestLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var entries []LogEntry
+	if err := json.NewDecoder(r.Body).Decode(&entries); err != nil {
+		http.Error(w, fmt.Sprintf("decoding body: %v", err), http.StatusBadRequest)
+		return
+	}
+	e.buffer.Push(entries)
+	w.WriteHeader(http.StatusOK)
 }

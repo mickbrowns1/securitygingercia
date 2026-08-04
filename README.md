@@ -23,7 +23,8 @@ run. Two binaries:
     timestamp parsing, field add/remove/copy/move) applied to every event
     before export.
   - **Exporters**: `splunk_hec` (works against both SentinelOne
-    DataPipeline and generic Splunk HEC endpoints) and `debug` (prints
+    DataPipeline and generic Splunk HEC endpoints), `dataset` (SentinelOne
+    Singularity Data Lake, formerly Scalyr/DataSet), and `debug` (prints
     events to the terminal, for testing a pipeline before wiring up a
     real destination).
 - **`sgcia`** -- the Rust companion. Two subcommands:
@@ -46,6 +47,7 @@ run. Two binaries:
 - [Upgrading](#upgrading)
 - [Uninstalling](#uninstalling)
 - [The status endpoint](#the-status-endpoint)
+- [The web UI](#the-web-ui)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
 
@@ -54,8 +56,8 @@ run. Two binaries:
 Everything below in one ordered list, for a fresh production box. Each
 step links to the detailed section if you need it.
 
-1. [Get the code](#1-get-the-code) and [build both binaries](#2-build-sgcia-otelcol-the-collector-engine) (`sgcia-otelcol`, `sgcia`) -- on the target machine itself, not cross-compiled.
-2. [Install both binaries](#4-install-both-binaries) to `/usr/local/bin` and create `/etc/sgcia` + `/var/lib/sgcia`.
+1. [Get the code](#1-get-the-code) and [build both binaries](#2-build-sgcia-otelcol-the-collector-engine) (`sgcia-otelcol`, `sgcia`) -- on the target machine itself, not cross-compiled. Steps 1-2 below are a single command on Linux/macOS -- see [Installing](#installing)'s "Fastest path".
+2. [Install both binaries](#4-install-both-binaries) to `/usr/local/bin` and create `/etc/sgcia` + `/var/lib/sgcia`. (Also covered by the same one-line install script.)
 3. [Write your config](#configuring) (`/etc/sgcia/config.yaml`), starting from [`otelcol/config/example.yaml`](otelcol/config/example.yaml) -- either by hand or with `sgcia edit`.
 4. [Supply secrets](#secrets) via `/etc/sgcia/sgcia.env` (HEC tokens, `chmod 600`).
 5. If you're listening on standard syslog ports (514/601): plan for [privileged ports](#privileged-ports) (the systemd unit already handles this) and open them in your [firewall](#firewall--network-access) if senders are on other hosts.
@@ -70,6 +72,26 @@ Not on Linux, or not using systemd? Steps 1-6 and 8 are platform-agnostic
 instead of step 7's systemd unit.
 
 ## Installing
+
+**Fastest path:** on Linux (Debian/Ubuntu, Fedora/RHEL/CentOS, or Arch) or
+macOS, one command does everything below through [step
+4](#4-install-both-binaries) -- installs git/Go/a C toolchain/Rust if
+they're missing, builds both binaries, installs them to
+`/usr/local/bin`, and creates `/etc/sgcia` + `/var/lib/sgcia` with a
+starter config copied in:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mickbrowns1/securitygingercia/main/install.sh | bash
+```
+
+(Or, if you've already cloned the repo: `./install.sh` from the repo
+root.) It asks for your login password only for the specific steps that
+need `sudo` (installing OS packages, copying into `/usr/local/bin`), and
+deliberately stops right where real configuration decisions start --
+see [Configuring](#configuring) and [Running as a systemd service
+(Linux)](#running-as-a-systemd-service-linux) for what comes next. Not
+on Linux/macOS, or want to see/control each step yourself? The rest of
+this section walks through exactly what the script automates.
 
 You're building two independent binaries here: `sgcia-otelcol` (Go) and
 `sgcia` (Rust). Neither depends on the other at build time.
@@ -326,7 +348,7 @@ extensions:       # id-keyed map -- cross-cutting add-ons (storage, health, stat
 service:
   extensions: [<extension-id>, ...]   # required to actually activate anything defined above -- see note below
   pipelines:
-    <name>:
+    logs/<name>:                      # "logs/" is required here, not a free choice -- see note below
       receivers: [<receiver-id>, ...]
       exporters: [<exporter-id>, ...]
 ```
@@ -338,6 +360,17 @@ selector; the part after `/` is just a label you choose, used to tell two
 instances of the same type apart (e.g. a `syslog/udp` and a `syslog/tcp`
 receiver side by side) and to reference the component from
 `service.pipelines`.
+
+**Pipeline ids are the one place this pattern doesn't apply.** A
+receiver/exporter/extension id's prefix can be any of that category's
+real component types, and the part after `/` is just your own label. A
+*pipeline* id's prefix instead has to be a recognized **signal name**
+-- `logs`, `metrics`, or `traces` (this distro only ever uses `logs`,
+since everything here is log pipelines) -- not a component type, and not
+optional. Naming a pipeline just `test` instead of `logs/test` produces
+a confusing `cannot unmarshal the configuration ... unknown pipeline
+signal: "test"` error on save, since `sgcia-otelcol validate` only
+checks each component's own fields and doesn't explain this rule.
 
 **`service.extensions` is easy to forget and the failure is confusing
 when you do**: defining something under `extensions:` only describes it;
@@ -387,10 +420,12 @@ service:
 | Receiver | `file_log` | Tails files matching a glob, like `tail -f` | `include`, `exclude`, `start_at`, `storage` |
 | Receiver | `windows_event_log` | Reads a Windows Event Log channel (**Windows only** -- fails to start on Linux/macOS, see [Windows](#windows)) | `channel`, `query`, `start_at`, `storage` |
 | Exporter | `splunk_hec` | Sends to a Splunk-compatible HEC endpoint, including SentinelOne DataPipeline | `endpoint`, `token`, `otel_attrs_to_hec_metadata.*` |
+| Exporter | `dataset` | Sends to SentinelOne Singularity Data Lake (formerly Scalyr/DataSet). **Alpha stability upstream** | `dataset_url`, `api_key`, `server_host.*` |
 | Exporter | `debug` | Prints events to the terminal -- for testing a pipeline before wiring up a real destination | `verbosity` |
+| Exporter | `logbuffer` | Feeds the web UI's log viewer (see [The web UI](#the-web-ui)) -- not a real destination, loopback-only, safe to add to every logs pipeline | `endpoint` |
 | Extension | `file_storage` | Persists a receiver's read position across restarts (referenced by a receiver's `storage` field) | `directory`, `create_directory` |
 | Extension | `health_check` | Simple HTTP health-check endpoint for this collector process | `endpoint` |
-| Extension | `statuscfg` | Serves `/status` + `/config` for `sgcia dashboard`/`sgcia edit` to poll | `endpoint`, `config_path`, `metrics_url` |
+| Extension | `statuscfg` | Serves `/status`, `/config`, `/topology`, `/logs`, and the web UI for `sgcia dashboard`/`sgcia edit`/a browser to poll | `endpoint`, `config_path`, `metrics_url` |
 
 Every receiver's optional `operators:` list draws from the same
 `pkg/stanza` vocabulary: `regex_parser`, `json_parser`,
@@ -399,6 +434,20 @@ Every receiver's optional `operators:` list draws from the same
 [`otelcol/config/example.yaml`](otelcol/config/example.yaml) for a
 complete, real example of each, including a full syslog pipeline with
 regex extraction and severity mapping feeding two HEC exporters.
+
+`dataset` routes events differently than `splunk_hec` -- it has no
+config-driven attribute-to-metadata mapping at all (no
+`otel_attrs_to_hec_metadata` equivalent). The only routing metadata it
+reads is a literal `serverHost` attribute, checked in order: the event's
+own `serverHost` attribute, then the resource's `serverHost`/`host.name`,
+then `server_host.server_host` in the exporter's own config, then (if
+`server_host.use_hostname` is `true`) this collector's own OS hostname.
+To set it per-event, add a plain `serverHost` attribute via an `add`
+operator on the receiver, same as `sourcetype` for `splunk_hec` -- see
+the `file_log/app` receiver in
+[`otelcol/config/example.yaml`](otelcol/config/example.yaml). If
+`server_host.use_hostname` is `false`, `server_host.server_host` becomes
+required -- the exporter fails at startup (not `validate`) without it.
 
 Two ways to build your own:
 
@@ -530,6 +579,10 @@ blanking. Press `q` or `Esc` to quit. `127.0.0.1:7801` is the default for
 both this flag and the `statuscfg` extension's own `endpoint`, so with the
 example config as-is, no flags are needed at all.
 
+The same `statuscfg.endpoint` also serves a small browser-based
+dashboard with a log viewer and topology diagram alongside the health
+view -- see [The web UI](#the-web-ui).
+
 ### `sgcia edit` -- interactive config editor
 
 ```bash
@@ -546,7 +599,13 @@ Rust-side validator to drift out of sync with the real thing.
 Every screen shows help as you go: picking a type shows a one-line
 description of what it does, and editing a component shows a plain-
 English explanation (with an example value) for whichever field is
-currently highlighted, at the bottom of the screen.
+currently highlighted, at the bottom of the screen. Press `?` from any
+browsing/list screen (top-level tabs, pick-a-type, the operators list)
+for a full keybinding reference (the same tables below), in case you
+forget one of these mid-session -- it's not intercepted while a text
+field is focused, so `?` still types normally there instead.
+
+#### Navigating the top-level list (Receivers / Exporters / Extensions / Pipelines)
 
 | Key | Action |
 |---|---|
@@ -556,16 +615,60 @@ currently highlighted, at the bottom of the screen.
 | `a` | Add a new item (pick a type, name it, then edit its fields) |
 | `d` / `Delete` | Remove the selected item (asks for confirmation if a pipeline still references it) |
 | `s` | Validate and save to disk |
+| `?` | Show the full keybinding reference |
 | `q` / `Esc` | Quit |
 
-While editing a component's fields: `Tab`/`Shift+Tab` moves between
-fields, `Left`/`Right` cycles enum-type and true/false fields, any other
-key types into the focused text field, `Esc` discards changes to that
-component. A receiver's `operators` field is different: pressing `Enter`
-on it opens a sub-screen for managing that receiver's inline parsing
-chain (same `a`/`Enter`/`d`/`Esc` keys, one level deeper) instead of
-submitting the form -- `Tab` off of it first if you meant to save the
-whole component instead.
+#### Editing a component's fields (the form screen)
+
+| Key | Action |
+|---|---|
+| `Tab` / `Shift+Tab` | Move to the next/previous field |
+| `Left` / `Right` | Cycle an enum-type or true/false field's value |
+| `Enter` | Save the form and go back to the list -- **except** on a receiver's `operators` field, where `Enter` instead opens the operator-list sub-screen (see below); `Tab` off of it first if you meant to submit the whole form |
+| `Esc` | Discard changes to this component, back to the list |
+| any other key | Types into the focused text field |
+
+#### Managing a receiver's inline `operators:` list
+
+Reached by pressing `Enter` on a receiver's `operators` field.
+
+| Key | Action |
+|---|---|
+| `Up` / `Down` | Move selection within the list |
+| `a` | Add a new operator (pick a type, then edit its fields) |
+| `Enter` | Edit the selected operator |
+| `d` / `Delete` | Remove the selected operator |
+| `Esc` | Back to the receiver's own form (focus moves off `operators`, so a follow-up `Enter` there submits the whole component instead of reopening this list) |
+
+#### Editing a text field's contents
+
+This is [`tui-input`](https://github.com/sayanarijit/tui-input)'s standard
+readline-style editing, available in every text field (not just an
+`sgcia`-specific convention) -- worth knowing well since it's the same in
+any field, on any screen:
+
+| Key | Action |
+|---|---|
+| `Left` / `Ctrl+B` | Move cursor back one character |
+| `Right` / `Ctrl+F` | Move cursor forward one character |
+| `Ctrl+Left` / `Alt+B` | Move cursor back one word |
+| `Ctrl+Right` / `Alt+F` | Move cursor forward one word |
+| `Home` / `Ctrl+A` | Move cursor to the start of the field |
+| `End` / `Ctrl+E` | Move cursor to the end of the field |
+| `Backspace` / `Ctrl+H` | Delete the character before the cursor |
+| `Delete` | Delete the character under/after the cursor |
+| `Ctrl+W` / `Alt+D` / `Alt+Backspace` | Delete the word before the cursor |
+| `Ctrl+Delete` | Delete the word after the cursor |
+| `Ctrl+K` | Delete from the cursor to the end of the field |
+| `Ctrl+U` | **Clear the entire field**, not just cursor-to-start -- the whole thing, wherever the cursor is |
+| `Ctrl+Y` | Paste back the text most recently removed by `Ctrl+U`/`Ctrl+W`/`Ctrl+K`/`Ctrl+Delete` |
+
+Newly-added fields often start pre-filled with a placeholder or default
+value (so the form is never blank) -- `Ctrl+U` is the fastest way to
+clear one before typing your real value, rather than editing around the
+placeholder. Note: pasting text into the terminal (as opposed to typing)
+and mouse clicks/selection aren't supported by the underlying input
+widget -- type or use the keys above.
 
 #### Walkthrough: build a minimal working config from scratch
 
@@ -591,7 +694,13 @@ the whole tool work end to end before wiring up a real HEC endpoint.
    `debug`. Press `Enter` on its field list to confirm it.
 7. Press `Tab` twice more to reach the **Pipelines** tab (tabs go
    Receivers → Exporters → Extensions → Pipelines), then `a` to add one.
-   Name it `test`.
+   Name it `logs/test` -- **the `logs/` prefix is required**, not just a
+   label choice like it is for receivers/exporters: OTel Collector
+   requires every pipeline id to start with a recognized signal name
+   (`logs`, `metrics`, or `traces`; this distro only ever uses `logs`).
+   Naming it just `test` produces a confusing
+   `cannot unmarshal the configuration ... unknown pipeline signal`
+   error on save.
 8. On its field list: set `receivers` to `file_log/test` and `exporters`
    to `debug`. Press `Enter` to save.
 9. Press `s` to validate and save the whole file. The status line at the
@@ -750,21 +859,34 @@ sudo userdel sgcia
 The `statuscfg` extension (a small local addition, not part of upstream
 contrib -- see
 [`otelcol/extensions/statuscfgextension`](otelcol/extensions/statuscfgextension))
-serves two read-only, unauthenticated endpoints on the address set by its
-`endpoint` field (bind it to loopback unless you have another way to
-restrict access -- there's no auth, and the loopback binding is the
-security boundary):
+serves several read-only, unauthenticated HTTP endpoints on the address
+set by its `endpoint` field (bind it to loopback unless you have another
+way to restrict access -- there's no auth, and the loopback binding is
+the security boundary):
 
 - `GET /status` -- a JSON metrics snapshot: `started_at`,
   `uptime_seconds`, and per-receiver/pipeline/exporter counters, derived
   from the collector's own internal Prometheus telemetry (see the
-  extension's `metrics_url` field). This is what `sgcia dashboard` polls;
-  useful directly too (`curl` it from a monitoring script, feed it to
-  your own dashboard, etc).
+  extension's `metrics_url` field). This is what `sgcia dashboard` and
+  the web UI's Health view poll; useful directly too (`curl` it from a
+  monitoring script, feed it to your own dashboard, etc).
 - `GET /config` -- the same config file passed to `sgcia-otelcol`'s own
   `--config` flag, re-read and served as JSON, with any field named
   `token`, `password`, `secret`, `api_key`, or `apikey` replaced with
   `"***redacted***"` at any nesting depth.
+- `GET /topology` -- a JSON graph (`nodes`/`edges`) of every configured
+  receiver, exporter, and pipeline, and how they connect, derived purely
+  from `service.pipelines` in the config above (not live data -- this
+  collector only has a logs signal, so there's no runtime call graph to
+  draw from). Powers the web UI's Topology view.
+- `GET /logs?q=&severity=` -- the current contents of an in-memory,
+  ~500-event rolling buffer of actual log record content (timestamp,
+  severity, body, attributes, resource), optionally filtered by a
+  case-insensitive substring (`q`) and/or exact severity match
+  (`severity`). Empty unless at least one pipeline has a `logbuffer`
+  exporter (see [Available components](#available-components) and
+  [The web UI](#the-web-ui) below) -- nothing is captured otherwise.
+- `GET /` -- the embedded web UI itself (see [The web UI](#the-web-ui)).
 
 ```console
 $ curl -s http://127.0.0.1:7801/status | jq .
@@ -790,6 +912,41 @@ approximation derived from the collector's own record-count telemetry
 message" at the default telemetry level) -- see the comments in
 `otelcol/extensions/statuscfgextension/extension.go` for exactly what's
 approximated and why.
+
+**Unlike `/config`, `/logs` is not redacted** -- it's the actual
+converted log record content (body, attributes, resource) for whatever
+pipelines have a `logbuffer` exporter attached. `/config` only ever
+exposes structure and (redacted) settings; `/logs` exposes real event
+data. Keep `statuscfg.endpoint` bound to loopback, same as today, and
+treat adding a `logbuffer` exporter as a deliberate choice per pipeline
+if that pipeline's log content is sensitive.
+
+## The web UI
+
+Point a browser at `http://<statuscfg.endpoint>/` (e.g.
+`http://127.0.0.1:7801/` if you haven't changed the default, or from a
+remote machine via an SSH tunnel: `ssh -L 7801:127.0.0.1:7801
+user@host`, since the endpoint itself stays loopback-only) for a small
+embedded dashboard -- plain HTML/CSS/vanilla JS served straight out of
+the `sgcia-otelcol` binary (`otelcol/extensions/statuscfgextension/webui/`),
+no separate process, no build step, no Node. Three views:
+
+- **Health** -- uptime plus per-receiver/pipeline/exporter counters,
+  polling `/status` every few seconds. The same data `sgcia dashboard`
+  shows in a terminal, in a browser instead.
+- **Logs** -- a live-updating table of actual log record content from
+  the `/logs` buffer, with a search box (matches body/attributes/
+  resource) and a severity filter. Empty until at least one pipeline has
+  a `logbuffer` exporter attached (see [Available
+  components](#available-components) above) -- add one via `sgcia edit`
+  or by hand, same as any other exporter.
+- **Topology** -- a receiver → pipeline → exporter diagram built from
+  `/topology`, so it's easy to see at a glance which destinations each
+  input actually feeds, especially once a config has several pipelines.
+
+This is a read-only companion to `sgcia dashboard`/`sgcia edit`, not a
+replacement -- the TUIs still work exactly as before, and the web UI is
+just another way to look at the same loopback-only endpoints.
 
 ## Troubleshooting
 
@@ -847,6 +1004,25 @@ approximated and why.
   fine (validate doesn't check that extensions are wired in, only that
   each one's own fields are well-formed) and only fails at real startup,
   which is what makes it confusing.
+
+- **`cannot unmarshal the configuration ... unknown pipeline signal:
+  "..."`** on save (this happens with **or** without `sudo` -- it's a
+  config-content problem, not a permissions one): a pipeline under
+  `service.pipelines` is named without the required signal prefix, e.g.
+  `test` instead of `logs/test`. Unlike receiver/exporter/extension ids,
+  where the part before `/` is a component type and the part after is
+  any label you like, a pipeline id's prefix must literally be `logs`,
+  `metrics`, or `traces` -- see the note in
+  [Configuring](#configuring). Rename the pipeline (in `sgcia edit`,
+  you'll need to delete it and re-add it with the corrected name, since
+  the id is set once at creation).
+
+- **`it was not get server host: when UseHostName is False, then
+  ServerHost has to be set`** at startup, from a `dataset` exporter: same
+  "passes `validate`, fails at real startup" shape as the extension issue
+  above. Either leave `server_host.use_hostname: true` (the default), or
+  set `server_host.server_host` to a real fallback value if you turn it
+  off -- see the note in [Configuring](#configuring).
 
 - **`download go1.25 for linux/arm64: toolchain not available`** while
   building `sgcia-otelcol`: see the note under

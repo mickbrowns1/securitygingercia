@@ -90,12 +90,17 @@ const SYSLOG_FIELDS: &[FieldSpec] = &[
         Some("rfc3164"),
         "Which syslog message format to expect. \"none\" keeps the message body as-is (still decodes a leading <34>-style PRI header if present).",
     ),
+    // Defaulted (rather than left required-but-blank) since at least one
+    // of udp.listen_address/tcp.listen_address must actually be set --
+    // the receiver refuses to start with neither -- and this is the one
+    // that's pre-filled so a freshly-added syslog receiver validates
+    // immediately instead of failing with "need tcp config or udp config".
     f(
         "udp.listen_address",
         FieldKind::Str,
-        false,
-        None,
-        "Set this to listen over UDP, e.g. 0.0.0.0:514 -- leave blank if using tcp.listen_address instead. 0.0.0.0 means \"every network interface on this machine\".",
+        true,
+        Some("0.0.0.0:514"),
+        "Set this to listen over UDP, e.g. 0.0.0.0:514 -- clear it if using tcp.listen_address instead (at least one of the two is required). 0.0.0.0 means \"every network interface on this machine\".",
     ),
     f(
         "tcp.listen_address",
@@ -257,6 +262,45 @@ const DEBUG_FIELDS: &[FieldSpec] = &[f(
     "How much detail to print per event to the terminal -- detailed dumps every field, useful for testing a pipeline before wiring up a real destination.",
 )];
 
+const DATASET_FIELDS: &[FieldSpec] = &[
+    f(
+        "dataset_url",
+        FieldKind::Str,
+        true,
+        Some("https://app.scalyr.com"),
+        "The SentinelOne Singularity Data Lake (formerly Scalyr/DataSet) ingest URL -- https://app.scalyr.com, or https://app.eu.scalyr.com for the EU instance.",
+    ),
+    f(
+        "api_key",
+        FieldKind::Str,
+        true,
+        None,
+        "The DataSet/SDL write log token. Use ${SOME_VAR} to read it from an environment variable instead of writing the real secret here.",
+    ),
+    f(
+        "server_host.use_hostname",
+        FieldKind::Bool,
+        false,
+        Some("true"),
+        "Fall back to this collector's own OS hostname for the event's serverHost if nothing more specific is set. Ignored if an event or its resource already carries a serverHost/host.name attribute -- see server_host.server_host below for the full lookup order.",
+    ),
+    f(
+        "server_host.server_host",
+        FieldKind::Str,
+        false,
+        None,
+        "Fixed fallback serverHost value, used only if use_hostname is false and no event/resource attribute supplies one (required in that case -- the exporter fails to start otherwise). To set serverHost per-event instead, add a plain `serverHost` attribute via this receiver's own `add` operator -- it takes priority over everything here.",
+    ),
+];
+
+const LOGBUFFER_FIELDS: &[FieldSpec] = &[f(
+    "endpoint",
+    FieldKind::Str,
+    false,
+    Some("http://127.0.0.1:7801"),
+    "Loopback address of this collector's own statuscfg extension -- must match statuscfg's endpoint field. Feeds the web UI's log viewer; not a real destination, safe to add to every logs pipeline.",
+)];
+
 // --- Extensions ---
 
 const FILE_STORAGE_FIELDS: &[FieldSpec] = &[
@@ -319,11 +363,15 @@ const ON_ERROR: FieldSpec = f(
 );
 
 const REGEX_PARSER_FIELDS: &[FieldSpec] = &[
+    // Defaulted to a trivial but *valid* pattern -- rather than a bare
+    // placeholder string -- since the real component requires at least
+    // one (?P<name>...) named capture group and rejects anything
+    // without one at startup.
     f(
         "regex",
         FieldKind::Str,
         true,
-        None,
+        Some(r"(?P<message>.*)"),
         r#"Go regular expression, with (?P<name>...) capture groups for each field to extract -- e.g. ^%ASA-(?P<severity>\d)-(?P<msgid>\d+):\s*(?P<message>.*)$"#,
     ),
     f(
@@ -398,7 +446,7 @@ const SEVERITY_PARSER_FIELDS: &[FieldSpec] = &[
         "parse_from",
         FieldKind::Str,
         true,
-        None,
+        Some("attributes.severity"),
         "Which field holds the severity value -- e.g. attributes.severity.",
     ),
     f(
@@ -416,7 +464,7 @@ const TIME_PARSER_FIELDS: &[FieldSpec] = &[
         "parse_from",
         FieldKind::Str,
         true,
-        None,
+        Some("attributes.ts"),
         "Which field holds the timestamp text -- e.g. attributes.ts.",
     ),
     f(
@@ -430,7 +478,7 @@ const TIME_PARSER_FIELDS: &[FieldSpec] = &[
         "layout",
         FieldKind::Str,
         true,
-        None,
+        Some("%Y-%m-%dT%H:%M:%SZ"),
         "The timestamp format, in the style selected by layout_type -- e.g. %Y-%m-%dT%H:%M:%SZ for strptime.",
     ),
     ON_ERROR,
@@ -441,7 +489,7 @@ const ADD_FIELDS: &[FieldSpec] = &[
         "field",
         FieldKind::Str,
         true,
-        None,
+        Some("attributes.datasource"),
         "Which field to set -- e.g. attributes.datasource.",
     ),
     f(
@@ -457,7 +505,7 @@ const REMOVE_FIELDS: &[FieldSpec] = &[f(
     "field",
     FieldKind::Str,
     true,
-    None,
+    Some("attributes.secret"),
     "Which field to delete -- e.g. attributes.secret.",
 )];
 
@@ -466,14 +514,14 @@ const FROM_TO_FIELDS: &[FieldSpec] = &[
         "from",
         FieldKind::Str,
         true,
-        None,
+        Some("attributes.message"),
         "Field to read the value from -- e.g. attributes.message.",
     ),
     f(
         "to",
         FieldKind::Str,
         true,
-        None,
+        Some("body"),
         "Field to write the value to -- e.g. body.",
     ),
 ];
@@ -506,6 +554,16 @@ const EXPORTER_TYPES: &[ComponentTypeSpec] = &[
         type_name: "debug",
         description: "Prints every event to the terminal instead of sending it anywhere -- useful for testing a pipeline before wiring up a real destination.",
         fields: DEBUG_FIELDS,
+    },
+    ComponentTypeSpec {
+        type_name: "dataset",
+        description: "Sends collected logs to SentinelOne Singularity Data Lake (formerly Scalyr/DataSet). Alpha stability upstream.",
+        fields: DATASET_FIELDS,
+    },
+    ComponentTypeSpec {
+        type_name: "logbuffer",
+        description: "Feeds this collector's own web UI log viewer over loopback -- not a real destination, local visibility only.",
+        fields: LOGBUFFER_FIELDS,
     },
 ];
 
@@ -705,5 +763,179 @@ mod tests {
             .unwrap();
         let value = minimal_value(spec);
         assert!(value.get("directory").is_some());
+    }
+
+    /// Every registered receiver/exporter/extension/operator type's
+    /// `minimal_value()` output must actually validate against the real
+    /// `sgcia-otelcol` binary once wrapped in a minimal full config --
+    /// catches registry/reality drift (a field renamed upstream, a new
+    /// required field, etc.) that nothing else here would catch. Skipped
+    /// (not failed) if the binary hasn't been built yet, matching the
+    /// pattern in `editor::model`'s own integration test.
+    #[test]
+    fn every_registered_type_round_trips_through_the_real_validator() {
+        let bin = test_otelcol_binary_path();
+        if !bin.exists() {
+            eprintln!("skipping: {} not built (see otelcol/README)", bin.display());
+            return;
+        }
+
+        let placeholder_receiver = || {
+            let mut m = serde_json::Map::new();
+            m.insert("include".to_string(), serde_json::json!(["/tmp/placeholder.log"]));
+            serde_json::Value::Object(m)
+        };
+
+        for spec in types_for(ComponentCategory::Receiver) {
+            if spec.type_name == "windows_event_log" {
+                continue; // only starts a pipeline successfully on Windows
+            }
+            let id = format!("{}/test", spec.type_name);
+            let config = wrap_in_full_config(
+                [(id.clone(), seeded_value(spec, false))],
+                [("debug".to_string(), serde_json::json!({}))],
+                &[],
+                [id],
+                ["debug".to_string()],
+            );
+            assert_validates(&bin, &config, spec.type_name);
+        }
+
+        for spec in types_for(ComponentCategory::Exporter) {
+            let id = format!("{}/test", spec.type_name);
+            let config = wrap_in_full_config(
+                [("file_log/test".to_string(), placeholder_receiver())],
+                [(id.clone(), seeded_value(spec, false))],
+                &[],
+                ["file_log/test".to_string()],
+                [id],
+            );
+            assert_validates(&bin, &config, spec.type_name);
+        }
+
+        for spec in types_for(ComponentCategory::Extension) {
+            let config = wrap_in_full_config(
+                [("file_log/test".to_string(), placeholder_receiver())],
+                [("debug".to_string(), serde_json::json!({}))],
+                &[(spec.type_name.to_string(), seeded_value(spec, false))],
+                ["file_log/test".to_string()],
+                ["debug".to_string()],
+            );
+            assert_validates(&bin, &config, spec.type_name);
+        }
+
+        for spec in operator_types() {
+            let op_value = seeded_value(spec, true);
+            let mut receiver = placeholder_receiver();
+            receiver["operators"] = serde_json::json!([op_value]);
+            let config = wrap_in_full_config(
+                [("file_log/test".to_string(), receiver)],
+                [("debug".to_string(), serde_json::json!({}))],
+                &[],
+                ["file_log/test".to_string()],
+                ["debug".to_string()],
+            );
+            assert_validates(&bin, &config, spec.type_name);
+        }
+    }
+
+    /// Runs a spec's `minimal_value()` seed through the exact same
+    /// `FormState::new(...).to_value()` round trip the real editor uses
+    /// when you add a new component and submit it untouched -- this
+    /// picks up every field's *default*, not just the required ones
+    /// `minimal_value()` alone seeds, matching what a real user actually
+    /// produces (e.g. `file_storage`'s `create_directory: true` default,
+    /// which isn't `required` but is always present in a real save).
+    fn seeded_value(spec: &ComponentTypeSpec, write_type_key: bool) -> serde_json::Value {
+        let seed = minimal_value(spec);
+        crate::editor::app::FormState::new(Some(spec.type_name), write_type_key, spec.fields, &seed)
+            .to_value()
+    }
+
+    /// Builds a minimal but complete otelcol config: the given receivers/
+    /// exporters/extensions, wired into a single `logs/test` pipeline
+    /// referencing the given receiver/exporter ids (extensions, if any,
+    /// are always activated via `service.extensions`).
+    fn wrap_in_full_config(
+        receivers: impl IntoIterator<Item = (String, serde_json::Value)>,
+        exporters: impl IntoIterator<Item = (String, serde_json::Value)>,
+        extensions: &[(String, serde_json::Value)],
+        pipeline_receivers: impl IntoIterator<Item = String>,
+        pipeline_exporters: impl IntoIterator<Item = String>,
+    ) -> serde_json::Value {
+        let mut root = serde_json::Map::new();
+        root.insert(
+            "receivers".to_string(),
+            serde_json::Value::Object(receivers.into_iter().collect()),
+        );
+        root.insert(
+            "exporters".to_string(),
+            serde_json::Value::Object(exporters.into_iter().collect()),
+        );
+        if !extensions.is_empty() {
+            root.insert(
+                "extensions".to_string(),
+                serde_json::Value::Object(extensions.iter().cloned().collect()),
+            );
+        }
+        let mut pipeline = serde_json::Map::new();
+        pipeline.insert(
+            "receivers".to_string(),
+            serde_json::Value::Array(pipeline_receivers.into_iter().map(|s| serde_json::json!(s)).collect()),
+        );
+        pipeline.insert(
+            "exporters".to_string(),
+            serde_json::Value::Array(pipeline_exporters.into_iter().map(|s| serde_json::json!(s)).collect()),
+        );
+        let mut pipelines = serde_json::Map::new();
+        pipelines.insert("logs/test".to_string(), serde_json::Value::Object(pipeline));
+        let mut service = serde_json::Map::new();
+        if !extensions.is_empty() {
+            service.insert(
+                "extensions".to_string(),
+                serde_json::Value::Array(
+                    extensions.iter().map(|(id, _)| serde_json::json!(id)).collect(),
+                ),
+            );
+        }
+        service.insert("pipelines".to_string(), serde_json::Value::Object(pipelines));
+        root.insert("service".to_string(), serde_json::Value::Object(service));
+        serde_json::Value::Object(root)
+    }
+
+    fn test_otelcol_binary_path() -> std::path::PathBuf {
+        if let Ok(p) = std::env::var("SGCIA_OTELCOL_BIN") {
+            return std::path::PathBuf::from(p);
+        }
+        // `cargo test` runs test binaries with cwd set to this crate's own
+        // manifest directory (crates/collector), not the workspace root,
+        // so a plain relative "otelcol/dist/..." never resolves here --
+        // anchor to CARGO_MANIFEST_DIR (set at compile time) instead.
+        let dev_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../otelcol/dist/sgcia-otelcol");
+        if dev_path.exists() {
+            return dev_path;
+        }
+        std::path::PathBuf::from("sgcia-otelcol")
+    }
+
+    fn assert_validates(bin: &std::path::Path, config: &serde_json::Value, type_name: &str) {
+        use std::io::Write;
+        let yaml_text = serde_yaml_ng::to_string(config).unwrap();
+        let mut tmp = tempfile::Builder::new().suffix(".yaml").tempfile().unwrap();
+        tmp.write_all(yaml_text.as_bytes()).unwrap();
+        tmp.flush().unwrap();
+
+        let output = std::process::Command::new(bin)
+            .arg("validate")
+            .arg("--config")
+            .arg(format!("file:{}", tmp.path().display()))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{type_name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
