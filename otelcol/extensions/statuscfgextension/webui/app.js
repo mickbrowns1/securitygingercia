@@ -350,7 +350,16 @@
   }
 
   var SANKEY_W = 900, NODE_W = 150, MIN_NODE_H = 22, NODE_GAP = 10;
-  var MIN_SANKEY_H = 140, MAX_SANKEY_H = 420, PX_PER_EVENT = 0.5;
+  var MIN_SANKEY_H = 160, MAX_SANKEY_H = 720, PX_PER_EVENT = 0.5;
+  // A column with only a handful of nodes has room to give each one a
+  // chunkier baseline box instead of shrinking everything to the bare
+  // MIN_NODE_H floor -- this ramps a column's per-node baseline height
+  // down from ROOMY_NODE_H as node count grows, only hitting the floor
+  // once a column is crowded enough to need it.
+  var ROOMY_NODE_H = 72;
+  function dynamicNodeH(maxCount) {
+    return Math.max(MIN_NODE_H, Math.min(ROOMY_NODE_H, ROOMY_NODE_H * 4 / maxCount));
+  }
 
   // Every ribbon used to be the same blue regardless of which pipeline
   // it belonged to, which made them unreadable the moment two pipelines'
@@ -367,8 +376,8 @@
   // its minimum and leave most of a fixed 420px canvas as dead space
   // below them, which is what actually prompted this. A genuinely busy
   // topology still gets capped at MAX_SANKEY_H, same as before.
-  function pickCanvasHeight(maxCount, globalMaxTotal) {
-    var reserved = MIN_NODE_H * maxCount + NODE_GAP * Math.max(maxCount - 1, 0);
+  function pickCanvasHeight(maxCount, globalMaxTotal, nodeH) {
+    var reserved = nodeH * maxCount + NODE_GAP * Math.max(maxCount - 1, 0);
     var natural = reserved + globalMaxTotal * PX_PER_EVENT;
     return Math.min(Math.max(natural, MIN_SANKEY_H), MAX_SANKEY_H);
   }
@@ -376,12 +385,12 @@
   // Each column is centered independently within the shared canvas
   // height -- columns with fewer/smaller nodes end up with breathing
   // room above and below instead of everything pinned to the top.
-  function layoutColumn(list, x, pxPerEvent, canvasHeight) {
-    var contentHeight = list.reduce(function (s, n) { return s + MIN_NODE_H + n.flow * pxPerEvent; }, 0) +
+  function layoutColumn(list, x, pxPerEvent, canvasHeight, nodeH) {
+    var contentHeight = list.reduce(function (s, n) { return s + nodeH + n.flow * pxPerEvent; }, 0) +
       NODE_GAP * Math.max(list.length - 1, 0);
     var y = Math.max((canvasHeight - contentHeight) / 2, 0);
     return list.map(function (nd) {
-      var height = MIN_NODE_H + nd.flow * pxPerEvent;
+      var height = nodeH + nd.flow * pxPerEvent;
       var box = { id: nd.id, flow: nd.flow, color: nd.color, x: x, y: y, height: height, inCursor: 0, outCursor: 0 };
       y += height + NODE_GAP;
       return box;
@@ -438,22 +447,25 @@
     // link's width matches at both ends instead of visibly tapering.
     var maxCount = Math.max(recv.length, pipe.length, exp.length, 1);
     var globalMaxTotal = Math.max(sumFlow(recv), sumFlow(pipe), sumFlow(exp));
-    var canvasHeight = pickCanvasHeight(maxCount, globalMaxTotal);
-    var reserved = MIN_NODE_H * maxCount + NODE_GAP * (maxCount - 1);
+    var nodeH = dynamicNodeH(maxCount);
+    var canvasHeight = pickCanvasHeight(maxCount, globalMaxTotal, nodeH);
+    var reserved = nodeH * maxCount + NODE_GAP * (maxCount - 1);
     var flexBudget = Math.max(canvasHeight - reserved, 0);
     var pxPerEvent = globalMaxTotal > 0 ? flexBudget / globalMaxTotal : 0;
 
     var colGap = (SANKEY_W - NODE_W * 3) / 2;
-    var recvBoxes = layoutColumn(recv, 0, pxPerEvent, canvasHeight);
-    var pipeBoxes = layoutColumn(pipe, NODE_W + colGap, pxPerEvent, canvasHeight);
-    var expBoxes = layoutColumn(exp, (NODE_W + colGap) * 2, pxPerEvent, canvasHeight);
+    var recvBoxes = layoutColumn(recv, 0, pxPerEvent, canvasHeight, nodeH);
+    var pipeBoxes = layoutColumn(pipe, NODE_W + colGap, pxPerEvent, canvasHeight, nodeH);
+    var expBoxes = layoutColumn(exp, (NODE_W + colGap) * 2, pxPerEvent, canvasHeight, nodeH);
 
     var byId = {};
     recvBoxes.forEach(function (b) { byId[b.id] = b; });
     pipeBoxes.forEach(function (b) { byId[b.id] = b; });
     expBoxes.forEach(function (b) { byId[b.id] = b; });
 
-    var links = (graph.edges || []).map(function (e) {
+    // Color and width are known per edge without touching layout, so
+    // compute those first in one pass.
+    var rawLinks = (graph.edges || []).map(function (e) {
       var s = byId[e.from], t = byId[e.to];
       if (!s || !t) return null;
       var flow = pipelineIds[e.to] ? flowFor(status, "receiver", e.from) : flowFor(status, "pipeline", e.from);
@@ -466,12 +478,37 @@
       // that a connection exists structurally, whether or not it's
       // carrying traffic right now.
       var w = Math.max(flow * pxPerEvent, 2);
+      return { s: s, t: t, w: w, color: color, from: e.from, to: e.to, flow: flow };
+    }).filter(Boolean);
+
+    // A node's stack of ribbons defaults to hugging its top edge (cursor
+    // starts at 0), which looks disconnected once boxes are taller than
+    // the ribbons landing on them -- a single thin ribbon on a tall box
+    // would sit right at the top instead of the middle. Center each
+    // node's whole stack of attachment points within its own height.
+    function centerCursors(links, side) {
+      var totalBySide = {};
+      links.forEach(function (l) {
+        var node = side === "out" ? l.s : l.t;
+        totalBySide[node.id] = (totalBySide[node.id] || 0) + l.w;
+      });
+      Object.keys(totalBySide).forEach(function (id) {
+        var box = byId[id];
+        var cursorKey = side === "out" ? "outCursor" : "inCursor";
+        box[cursorKey] = Math.max((box.height - totalBySide[id]) / 2, 0);
+      });
+    }
+    centerCursors(rawLinks, "out");
+    centerCursors(rawLinks, "in");
+
+    var links = rawLinks.map(function (l) {
+      var s = l.s, t = l.t, w = l.w;
       var sy = s.y + s.outCursor + w / 2;
       s.outCursor += w;
       var ty = t.y + t.inCursor + w / 2;
       t.inCursor += w;
-      return { sx: s.x + NODE_W, sy: sy, tx: t.x, ty: ty, w: w, color: color, from: e.from, to: e.to, flow: flow };
-    }).filter(Boolean);
+      return { sx: s.x + NODE_W, sy: sy, tx: t.x, ty: ty, w: w, color: l.color, from: l.from, to: l.to, flow: l.flow };
+    });
 
     var svg = '<svg viewBox="0 0 ' + SANKEY_W + ' ' + canvasHeight + '" class="sankey-svg" preserveAspectRatio="xMinYMin meet">' +
       links.map(sankeyLinkSVG).join("") +

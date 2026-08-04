@@ -833,6 +833,12 @@ no separate process, no build step, no Node. Three views:
   pipeline gets its own color (carried onto both its inbound and
   outbound ribbons and its node border), so a pipeline stays traceable
   through crossings instead of blurring into a single wash of blue.
+  Box height grows on its own when a column only has a few nodes to
+  show (shrinking back down once a column gets crowded), and every
+  ribbon lands on the vertical middle of the node it touches rather
+  than stacking from the top edge, so a lightly-used node's ribbon
+  doesn't look like it's clinging to one corner of an otherwise-empty
+  box.
 
 Keyboard shortcuts (press `?` anywhere in the UI for a reminder): `h`/
 `l`/`t` jump to Health/Logs/Topology, `/` focuses the Logs search box,
