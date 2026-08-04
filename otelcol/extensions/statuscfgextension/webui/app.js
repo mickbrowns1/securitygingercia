@@ -365,11 +365,30 @@
   // it belonged to, which made them unreadable the moment two pipelines'
   // ribbons crossed (exactly what happens once they fan out to shared
   // exporters, which every example config here does). Each pipeline
-  // gets one color from this palette, used consistently for both its
-  // inbound (receiver-side) and outbound (exporter-side) ribbons and its
-  // own node border, so you can trace one pipeline's flow across a
-  // crossing by eye. Cycles if there are more pipelines than colors.
+  // gets one base color from this palette, used as-is for its outbound
+  // (exporter-side) ribbons and its own node border, so you can trace
+  // one pipeline's flow across a crossing by eye. Cycles if there are
+  // more pipelines than colors.
   var SANKEY_PALETTE = ["#5aa9e6", "#4caf7d", "#e0a83e", "#c77dff", "#5ee6c0", "#e0605e", "#f08fb0", "#8fa6e6"];
+
+  // Multiple receivers feeding the *same* pipeline (e.g. syslog/udp and
+  // syslog/tcp both into logs/syslog) all inherit that pipeline's base
+  // color on their inbound ribbons, which made them indistinguishable
+  // from each other. Each inbound ribbon into a given pipeline gets a
+  // shade offset from this list (by the order it's fed in), cycling if a
+  // pipeline has more receivers than offsets -- the first receiver still
+  // gets the pure base color (offset 0), matching the node border.
+  var SHADE_OFFSETS = [0, -28, 28, -45, 45, -14, 14];
+
+  function shadeColor(hex, percent) {
+    var num = parseInt(hex.slice(1), 16);
+    var r = (num >> 16) & 0xff, g = (num >> 8) & 0xff, b = num & 0xff;
+    function adjust(c) {
+      return percent >= 0 ? c + (255 - c) * (percent / 100) : c + c * (percent / 100);
+    }
+    function toHex(c) { return Math.min(255, Math.max(0, Math.round(c))).toString(16).padStart(2, "0"); }
+    return "#" + toHex(adjust(r)) + toHex(adjust(g)) + toHex(adjust(b));
+  }
 
   // Height is fit-to-content (clamped) rather than a fixed canvas --
   // an all-zero or near-empty topology used to collapse every node to
@@ -464,15 +483,28 @@
     expBoxes.forEach(function (b) { byId[b.id] = b; });
 
     // Color and width are known per edge without touching layout, so
-    // compute those first in one pass.
+    // compute those first in one pass. inboundSeen tracks, per pipeline,
+    // how many of its receiver-side edges have been assigned a shade so
+    // far, so each one gets a different offset from SHADE_OFFSETS.
+    var inboundSeen = {};
     var rawLinks = (graph.edges || []).map(function (e) {
       var s = byId[e.from], t = byId[e.to];
       if (!s || !t) return null;
       var flow = pipelineIds[e.to] ? flowFor(status, "receiver", e.from) : flowFor(status, "pipeline", e.from);
-      // Color every ribbon by whichever endpoint is the pipeline, so a
-      // pipeline's two edges (receiver-in and exporter-out) share a color
-      // and stay traceable through crossings once exporters fan out.
-      var color = pipelineIds[e.to] ? t.color : s.color;
+      var color;
+      if (pipelineIds[e.to]) {
+        // Receiver -> pipeline: shade by which receiver this is, so two
+        // receivers feeding the same pipeline (e.g. syslog/udp and
+        // syslog/tcp both into logs/syslog) don't render identically.
+        var seen = inboundSeen[e.to] || 0;
+        inboundSeen[e.to] = seen + 1;
+        color = shadeColor(t.color, SHADE_OFFSETS[seen % SHADE_OFFSETS.length]);
+      } else {
+        // Pipeline -> exporter: keep the pure base color unshaded, so
+        // the pipeline stays traceable by one consistent hue across
+        // every exporter it feeds, even as ribbons cross.
+        color = s.color;
+      }
       // Even a zero-flow edge gets a real, visible ribbon (2px) rather
       // than fading into an unreadable hairline -- the point is to show
       // that a connection exists structurally, whether or not it's

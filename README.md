@@ -830,9 +830,13 @@ no separate process, no build step, no Node. Three views:
   it easy to see at a glance which destinations each input actually
   feeds and how much of the total volume flows where, especially once a
   config has several pipelines fanning out to shared exporters. Each
-  pipeline gets its own color (carried onto both its inbound and
-  outbound ribbons and its node border), so a pipeline stays traceable
-  through crossings instead of blurring into a single wash of blue.
+  pipeline gets its own base color, carried unshaded onto its node
+  border and every outbound (exporter-side) ribbon, so a pipeline stays
+  traceable through crossings instead of blurring into a single wash of
+  blue. Inbound (receiver-side) ribbons get a shade variant of that same
+  base color per receiver, so two receivers feeding one pipeline (e.g.
+  syslog/udp and syslog/tcp both into logs/syslog) don't render as one
+  indistinguishable ribbon.
   Box height grows on its own when a column only has a few nodes to
   show (shrinking back down once a column gets crowded), and every
   ribbon lands on the vertical middle of the node it touches rather
