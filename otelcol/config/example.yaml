@@ -9,7 +9,11 @@
 #
 # This mirrors the three pipelines in ../../configs/example.yaml (syslog,
 # file, Windows Event Log -> SentinelOne + Splunk HEC), translated to real
-# OTel Collector shape:
+# OTel Collector shape, plus a fourth syslog pipeline (logs/syslog5424)
+# added to demonstrate RFC 5424 alongside RFC 3164 -- see the note on
+# syslog/rfc5424 below and README.md's Troubleshooting section for why
+# these are two separate receivers rather than one receiver switched to
+# a different protocol:
 #   - each receiver owns its own inline `operators:` list (stanza vocabulary)
 #     instead of a shared top-level `operators:` section.
 #   - checkpoint/bookmark persistence is a `storage:` extension reference
@@ -92,6 +96,40 @@ receivers:
         id: add_sourcetype
         field: attributes.sourcetype
         value: "cisco_asa_ts_parser"
+      - type: move
+        id: move_message_to_body
+        from: attributes.message
+        to: body
+
+  # Demonstrates the *other* half of the syslog RFC split covered in
+  # README.md's Troubleshooting section: RFC 5424 (2009) is what most
+  # modern senders actually emit today -- a current util-linux `logger`,
+  # rsyslog's own default remote-forwarding template -- not the older
+  # RFC 3164 the syslog/udp and syslog/tcp receivers above expect (those
+  # model a Cisco ASA, which predates RFC 5424 and never sends it).
+  # RFC 5424's envelope is already structured (version, hostname,
+  # app-name, proc-id, msg-id, structured-data), so unlike the ASA
+  # pipeline above, no regex_parser is needed to pull fields out of the
+  # message body -- the receiver extracts them into attributes.message
+  # on its own. The `move` below is still required, though: the receiver
+  # leaves `body` as the *entire* raw line (version/hostname/structured-
+  # data and all) regardless of protocol, only ever populating
+  # attributes.message with the clean text -- moving it into body is
+  # what the ASA pipeline's own `move` step does too, just fed by a
+  # regex_parser capture group there instead of the receiver itself.
+  syslog/rfc5424:
+    protocol: rfc5424
+    udp:
+      listen_address: "0.0.0.0:1514"
+    operators:
+      - type: add
+        id: add_datasource
+        field: attributes.datasource
+        value: "linux_host"
+      - type: add
+        id: add_sourcetype
+        field: attributes.sourcetype
+        value: "linux_rsyslog"
       - type: move
         id: move_message_to_body
         from: attributes.message
@@ -191,6 +229,10 @@ service:
   pipelines:
     logs/syslog:
       receivers: [syslog/udp, syslog/tcp]
+      exporters: [splunk_hec/sentinelone, splunk_hec/splunk, logbuffer]
+
+    logs/syslog5424:
+      receivers: [syslog/rfc5424]
       exporters: [splunk_hec/sentinelone, splunk_hec/splunk, logbuffer]
 
     logs/files:

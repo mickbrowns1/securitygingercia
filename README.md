@@ -243,8 +243,13 @@ Every receiver's optional `operators:` list draws from the same
 `key_value_parser`, `severity_parser`, `time_parser` (parsers), and
 `add`/`remove`/`copy`/`move` (field manipulation) -- see
 [`otelcol/config/example.yaml`](otelcol/config/example.yaml) for a
-complete, real example of each, including a full syslog pipeline with
-regex extraction and severity mapping feeding two HEC exporters.
+complete, real example of each, including two syslog pipelines side by
+side: an RFC 3164 one (modeling a Cisco ASA, with regex extraction and
+severity mapping for its `%ASA-X-XXXXX:`-style messages) and an RFC
+5424 one (modeling a modern Linux host via rsyslog, whose already-
+structured envelope needs no regex at all) -- see [the RFC
+3164/5424 mismatch entry](#troubleshooting) if you're not sure which
+your own sender actually speaks.
 
 `dataset` routes events differently than `splunk_hec` -- it has no
 config-driven attribute-to-metadata mapping at all (no
