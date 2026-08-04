@@ -191,6 +191,10 @@ sudo chown "$USER" /etc/sgcia /var/lib/sgcia
 
 if [ ! -f /etc/sgcia/config.yaml ]; then
   step "Copying the example config to /etc/sgcia/config.yaml as a starting point"
+  # example.yaml, not example-windows.yaml -- this script only ever runs
+  # on Linux/macOS (see the OS check above), and windows_event_log (the
+  # only difference between the two) refuses to even start on those
+  # platforms. See MANUAL.md's Windows section for that variant.
   cp "$REPO_ROOT/otelcol/config/example.yaml" /etc/sgcia/config.yaml
   # The example ships a dev-relative config_path (correct only when run
   # from inside otelcol/, per README.md's Configuring section) -- rewrite

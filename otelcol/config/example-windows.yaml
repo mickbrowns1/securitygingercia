@@ -1,12 +1,13 @@
 # Example config for sgcia's OTel-based collector engine (otelcol/dist/sgcia-otelcol).
-# Linux/macOS variant -- no windows_event_log receiver, since that receiver
-# only runs on an actual Windows host (the collector refuses to start a
-# pipeline using it anywhere else). Running on Windows instead? Start from
-# example-windows.yaml, which is this same file plus that one receiver and
-# its pipeline -- see MANUAL.md's Windows section.
+# Windows variant -- identical to example.yaml plus the windows_event_log
+# receiver and its pipeline, since that receiver only runs on an actual
+# Windows host (the collector refuses to start a pipeline using it on
+# Linux/macOS). See MANUAL.md's Windows section for the rest of the setup
+# (file_storage's directory and windows_event_log's channel below still
+# need real values, and paths need Windows separators).
 #
-# Validate with:  ./dist/sgcia-otelcol validate --config file:config/example.yaml
-# Run with:       ./dist/sgcia-otelcol         --config file:config/example.yaml
+# Validate with:  ./dist/sgcia-otelcol validate --config file:config/example-windows.yaml
+# Run with:       ./dist/sgcia-otelcol         --config file:config/example-windows.yaml
 #
 # Secrets referenced as ${VAR} below (S1_HEC_TOKEN, SPLUNK_HEC_TOKEN,
 # DATASET_API_KEY) are read from the environment at load time via the
@@ -43,7 +44,7 @@ extensions:
     # --status-addr, so `sgcia dashboard` / `sgcia edit` work against this
     # binary with no flags and no Rust code changes.
     endpoint: 127.0.0.1:7801
-    config_path: ./config/example.yaml
+    config_path: ./config/example-windows.yaml
     metrics_url: http://127.0.0.1:8888/metrics
 
 receivers:
@@ -161,6 +162,17 @@ receivers:
         field: attributes.serverHost
         value: "myapp-host"
 
+  windows_event_log/security:
+    channel: Security
+    query: "*"
+    start_at: end
+    storage: file_storage
+    operators:
+      - type: add
+        id: add_sourcetype
+        field: attributes.sourcetype
+        value: "windows_security"
+
 exporters:
   splunk_hec/sentinelone:
     endpoint: "https://xdr.us1.sentinelone.net/services/collector/event"
@@ -232,3 +244,7 @@ service:
     logs/files:
       receivers: [file_log/app]
       exporters: [splunk_hec/sentinelone, dataset/sdl, logbuffer]
+
+    logs/windows:
+      receivers: [windows_event_log/security]
+      exporters: [splunk_hec/sentinelone, logbuffer]

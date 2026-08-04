@@ -229,7 +229,7 @@ service:
 |---|---|---|---|
 | Receiver | `syslog` | Listens for syslog over UDP and/or TCP | `protocol`, `udp.listen_address`/`tcp.listen_address`, `enable_octet_counting` |
 | Receiver | `file_log` | Tails files matching a glob, like `tail -f` | `include`, `exclude`, `start_at`, `storage` |
-| Receiver | `windows_event_log` | Reads a Windows Event Log channel (**Windows only** -- fails to start on Linux/macOS, see [Windows](MANUAL.md#windows)) | `channel`, `query`, `start_at`, `storage` |
+| Receiver | `windows_event_log` | Reads a Windows Event Log channel (**Windows only** -- fails to start on Linux/macOS, see [Windows](MANUAL.md#windows)). Left out of `example.yaml` for exactly that reason -- it's only in [`example-windows.yaml`](otelcol/config/example-windows.yaml) | `channel`, `query`, `start_at`, `storage` |
 | Exporter | `splunk_hec` | Sends to a Splunk-compatible HEC endpoint, including SentinelOne DataPipeline | `endpoint`, `token`, `otel_attrs_to_hec_metadata.*` |
 | Exporter | `dataset` | Sends to SentinelOne Singularity Data Lake (formerly Scalyr/DataSet). **Alpha stability upstream** | `dataset_url`, `api_key`, `server_host.*` |
 | Exporter | `debug` | Prints events to the terminal -- for testing a pipeline before wiring up a real destination | `verbosity` |
@@ -962,8 +962,13 @@ just another way to look at the same loopback-only endpoints.
 - **`windows eventlog receiver is only supported on Windows`**: exactly
   what it says -- a pipeline using `windows_event_log` will fail to
   start the collector on Linux/macOS even though the binary builds fine
-  there. Either drop that pipeline from configs you run on non-Windows
-  hosts, or run this component specifically on a Windows host (see
+  there. If you started from `example.yaml` (the Linux/macOS sample)
+  this shouldn't come up -- it doesn't have that pipeline. It means
+  either your config was hand-written to include `windows_event_log`
+  outside of Windows, or you started from
+  [`example-windows.yaml`](otelcol/config/example-windows.yaml) on a
+  non-Windows host by mistake. Drop that pipeline for non-Windows hosts,
+  or run this component specifically on a Windows host (see
   [Windows](MANUAL.md#windows)).
 
 - **`sgcia edit` says `couldn't run 'sgcia-otelcol validate'`** on save:

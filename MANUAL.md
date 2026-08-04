@@ -189,7 +189,13 @@ running as a **systemd service** under its own dedicated user later (see
 The `windows_event_log` receiver only runs on Windows (it compiles
 elsewhere, but the collector refuses to start a pipeline using it on
 Linux/macOS) -- if you need that receiver, build and run `sgcia-otelcol`
-on an actual Windows host, not cross-compiled from Linux/macOS.
+on an actual Windows host, not cross-compiled from Linux/macOS. That's
+also why there are two example configs:
+[`otelcol/config/example.yaml`](otelcol/config/example.yaml) (no
+`windows_event_log`, used on Linux/macOS) and
+[`otelcol/config/example-windows.yaml`](otelcol/config/example-windows.yaml)
+(the same thing plus that one receiver and its pipeline) -- start from
+the Windows one here, not the plain one.
 
 In a PowerShell prompt, with [Git](https://git-scm.com/downloads/win),
 [Go](https://go.dev/doc/install), and the
@@ -220,6 +226,7 @@ working directories:
 ```powershell
 New-Item -ItemType Directory -Force -Path C:\ProgramData\sgcia
 New-Item -ItemType Directory -Force -Path C:\ProgramData\sgcia\storage
+Copy-Item otelcol\config\example-windows.yaml C:\ProgramData\sgcia\config.yaml
 ```
 
 Point your config's `file_storage` extension's `directory` and
