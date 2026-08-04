@@ -829,7 +829,10 @@ no separate process, no build step, no Node. Three views:
   output, not a fraction of it, so this is exact, not estimated). Makes
   it easy to see at a glance which destinations each input actually
   feeds and how much of the total volume flows where, especially once a
-  config has several pipelines fanning out to shared exporters.
+  config has several pipelines fanning out to shared exporters. Each
+  pipeline gets its own color (carried onto both its inbound and
+  outbound ribbons and its node border), so a pipeline stays traceable
+  through crossings instead of blurring into a single wash of blue.
 
 Keyboard shortcuts (press `?` anywhere in the UI for a reminder): `h`/
 `l`/`t` jump to Health/Logs/Topology, `/` focuses the Logs search box,

@@ -352,6 +352,16 @@
   var SANKEY_W = 900, NODE_W = 150, MIN_NODE_H = 22, NODE_GAP = 10;
   var MIN_SANKEY_H = 140, MAX_SANKEY_H = 420, PX_PER_EVENT = 0.5;
 
+  // Every ribbon used to be the same blue regardless of which pipeline
+  // it belonged to, which made them unreadable the moment two pipelines'
+  // ribbons crossed (exactly what happens once they fan out to shared
+  // exporters, which every example config here does). Each pipeline
+  // gets one color from this palette, used consistently for both its
+  // inbound (receiver-side) and outbound (exporter-side) ribbons and its
+  // own node border, so you can trace one pipeline's flow across a
+  // crossing by eye. Cycles if there are more pipelines than colors.
+  var SANKEY_PALETTE = ["#5aa9e6", "#4caf7d", "#e0a83e", "#c77dff", "#5ee6c0", "#e0605e", "#f08fb0", "#8fa6e6"];
+
   // Height is fit-to-content (clamped) rather than a fixed canvas --
   // an all-zero or near-empty topology used to collapse every node to
   // its minimum and leave most of a fixed 420px canvas as dead space
@@ -372,7 +382,7 @@
     var y = Math.max((canvasHeight - contentHeight) / 2, 0);
     return list.map(function (nd) {
       var height = MIN_NODE_H + nd.flow * pxPerEvent;
-      var box = { id: nd.id, flow: nd.flow, x: x, y: y, height: height, inCursor: 0, outCursor: 0 };
+      var box = { id: nd.id, flow: nd.flow, color: nd.color, x: x, y: y, height: height, inCursor: 0, outCursor: 0 };
       y += height + NODE_GAP;
       return box;
     });
@@ -380,9 +390,10 @@
 
   function sankeyNodeSVG(box, type) {
     var h = Math.max(box.height, 1);
+    var strokeStyle = box.color ? ' style="stroke:' + box.color + '"' : "";
     return '<g>' +
       '<rect x="' + box.x + '" y="' + box.y + '" width="' + NODE_W + '" height="' + h +
-      '" rx="4" class="sankey-node sankey-node-' + type + '"></rect>' +
+      '" rx="4" class="sankey-node sankey-node-' + type + '"' + strokeStyle + '></rect>' +
       '<foreignObject x="' + box.x + '" y="' + box.y + '" width="' + NODE_W + '" height="' + h + '">' +
       '<div xmlns="http://www.w3.org/1999/xhtml" class="sankey-label" title="' + escapeHTML(box.id) + '">' +
       '<span class="sankey-label-name">' + escapeHTML(box.id) + '</span>' +
@@ -399,7 +410,8 @@
       " C" + midX + "," + y0top + " " + midX + "," + y1top + " " + link.tx + "," + y1top +
       " L" + link.tx + "," + y1bot +
       " C" + midX + "," + y1bot + " " + midX + "," + y0bot + " " + link.sx + "," + y0bot + " Z";
-    return '<path d="' + d + '" class="sankey-link"><title>' + escapeHTML(link.from + " → " + link.to + ": " + link.flow) + "</title></path>";
+    var fillStyle = link.color ? ' style="fill:' + link.color + '"' : "";
+    return '<path d="' + d + '" class="sankey-link"' + fillStyle + '><title>' + escapeHTML(link.from + " → " + link.to + ": " + link.flow) + "</title></path>";
   }
 
   function renderTopology(graph, status) {
@@ -418,6 +430,7 @@
       .sort(function (a, b) { return b.flow - a.flow || a.id.localeCompare(b.id); });
     var pipe = nodesByType.pipeline.map(function (n) { return { id: n.id, flow: flowFor(status, "pipeline", n.id) }; })
       .sort(function (a, b) { return b.flow - a.flow || a.id.localeCompare(b.id); });
+    pipe.forEach(function (p, i) { p.color = SANKEY_PALETTE[i % SANKEY_PALETTE.length]; });
     var exp = nodesByType.exporter.map(function (n) { return { id: n.id, flow: flowFor(status, "exporter", n.id) }; })
       .sort(function (a, b) { return b.flow - a.flow || a.id.localeCompare(b.id); });
 
@@ -444,6 +457,10 @@
       var s = byId[e.from], t = byId[e.to];
       if (!s || !t) return null;
       var flow = pipelineIds[e.to] ? flowFor(status, "receiver", e.from) : flowFor(status, "pipeline", e.from);
+      // Color every ribbon by whichever endpoint is the pipeline, so a
+      // pipeline's two edges (receiver-in and exporter-out) share a color
+      // and stay traceable through crossings once exporters fan out.
+      var color = pipelineIds[e.to] ? t.color : s.color;
       // Even a zero-flow edge gets a real, visible ribbon (2px) rather
       // than fading into an unreadable hairline -- the point is to show
       // that a connection exists structurally, whether or not it's
@@ -453,7 +470,7 @@
       s.outCursor += w;
       var ty = t.y + t.inCursor + w / 2;
       t.inCursor += w;
-      return { sx: s.x + NODE_W, sy: sy, tx: t.x, ty: ty, w: w, from: e.from, to: e.to, flow: flow };
+      return { sx: s.x + NODE_W, sy: sy, tx: t.x, ty: ty, w: w, color: color, from: e.from, to: e.to, flow: flow };
     }).filter(Boolean);
 
     var svg = '<svg viewBox="0 0 ' + SANKEY_W + ' ' + canvasHeight + '" class="sankey-svg" preserveAspectRatio="xMinYMin meet">' +
