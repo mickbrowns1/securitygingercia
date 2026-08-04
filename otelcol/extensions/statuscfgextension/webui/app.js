@@ -349,10 +349,27 @@
     return list.reduce(function (s, n) { return s + n.flow; }, 0);
   }
 
-  var SANKEY_W = 900, SANKEY_H = 420, NODE_W = 150, MIN_NODE_H = 22, NODE_GAP = 10;
+  var SANKEY_W = 900, NODE_W = 150, MIN_NODE_H = 22, NODE_GAP = 10;
+  var MIN_SANKEY_H = 140, MAX_SANKEY_H = 420, PX_PER_EVENT = 0.5;
 
-  function layoutColumn(list, x, pxPerEvent) {
-    var y = 0;
+  // Height is fit-to-content (clamped) rather than a fixed canvas --
+  // an all-zero or near-empty topology used to collapse every node to
+  // its minimum and leave most of a fixed 420px canvas as dead space
+  // below them, which is what actually prompted this. A genuinely busy
+  // topology still gets capped at MAX_SANKEY_H, same as before.
+  function pickCanvasHeight(maxCount, globalMaxTotal) {
+    var reserved = MIN_NODE_H * maxCount + NODE_GAP * Math.max(maxCount - 1, 0);
+    var natural = reserved + globalMaxTotal * PX_PER_EVENT;
+    return Math.min(Math.max(natural, MIN_SANKEY_H), MAX_SANKEY_H);
+  }
+
+  // Each column is centered independently within the shared canvas
+  // height -- columns with fewer/smaller nodes end up with breathing
+  // room above and below instead of everything pinned to the top.
+  function layoutColumn(list, x, pxPerEvent, canvasHeight) {
+    var contentHeight = list.reduce(function (s, n) { return s + MIN_NODE_H + n.flow * pxPerEvent; }, 0) +
+      NODE_GAP * Math.max(list.length - 1, 0);
+    var y = Math.max((canvasHeight - contentHeight) / 2, 0);
     return list.map(function (nd) {
       var height = MIN_NODE_H + nd.flow * pxPerEvent;
       var box = { id: nd.id, flow: nd.flow, x: x, y: y, height: height, inCursor: 0, outCursor: 0 };
@@ -407,14 +424,16 @@
     // One shared scale across the whole diagram (not per-column) so a
     // link's width matches at both ends instead of visibly tapering.
     var maxCount = Math.max(recv.length, pipe.length, exp.length, 1);
-    var flexBudget = Math.max(SANKEY_H - NODE_GAP * (maxCount - 1) - MIN_NODE_H * maxCount, 1);
-    var globalMaxTotal = Math.max(sumFlow(recv), sumFlow(pipe), sumFlow(exp), 1);
-    var pxPerEvent = flexBudget / globalMaxTotal;
+    var globalMaxTotal = Math.max(sumFlow(recv), sumFlow(pipe), sumFlow(exp));
+    var canvasHeight = pickCanvasHeight(maxCount, globalMaxTotal);
+    var reserved = MIN_NODE_H * maxCount + NODE_GAP * (maxCount - 1);
+    var flexBudget = Math.max(canvasHeight - reserved, 0);
+    var pxPerEvent = globalMaxTotal > 0 ? flexBudget / globalMaxTotal : 0;
 
     var colGap = (SANKEY_W - NODE_W * 3) / 2;
-    var recvBoxes = layoutColumn(recv, 0, pxPerEvent);
-    var pipeBoxes = layoutColumn(pipe, NODE_W + colGap, pxPerEvent);
-    var expBoxes = layoutColumn(exp, (NODE_W + colGap) * 2, pxPerEvent);
+    var recvBoxes = layoutColumn(recv, 0, pxPerEvent, canvasHeight);
+    var pipeBoxes = layoutColumn(pipe, NODE_W + colGap, pxPerEvent, canvasHeight);
+    var expBoxes = layoutColumn(exp, (NODE_W + colGap) * 2, pxPerEvent, canvasHeight);
 
     var byId = {};
     recvBoxes.forEach(function (b) { byId[b.id] = b; });
@@ -425,7 +444,11 @@
       var s = byId[e.from], t = byId[e.to];
       if (!s || !t) return null;
       var flow = pipelineIds[e.to] ? flowFor(status, "receiver", e.from) : flowFor(status, "pipeline", e.from);
-      var w = Math.max(flow * pxPerEvent, flow > 0 ? 1.5 : 0.5);
+      // Even a zero-flow edge gets a real, visible ribbon (2px) rather
+      // than fading into an unreadable hairline -- the point is to show
+      // that a connection exists structurally, whether or not it's
+      // carrying traffic right now.
+      var w = Math.max(flow * pxPerEvent, 2);
       var sy = s.y + s.outCursor + w / 2;
       s.outCursor += w;
       var ty = t.y + t.inCursor + w / 2;
@@ -433,7 +456,7 @@
       return { sx: s.x + NODE_W, sy: sy, tx: t.x, ty: ty, w: w, from: e.from, to: e.to, flow: flow };
     }).filter(Boolean);
 
-    var svg = '<svg viewBox="0 0 ' + SANKEY_W + ' ' + SANKEY_H + '" class="sankey-svg" preserveAspectRatio="xMinYMin meet">' +
+    var svg = '<svg viewBox="0 0 ' + SANKEY_W + ' ' + canvasHeight + '" class="sankey-svg" preserveAspectRatio="xMinYMin meet">' +
       links.map(sankeyLinkSVG).join("") +
       recvBoxes.map(function (b) { return sankeyNodeSVG(b, "receiver"); }).join("") +
       pipeBoxes.map(function (b) { return sankeyNodeSVG(b, "pipeline"); }).join("") +
