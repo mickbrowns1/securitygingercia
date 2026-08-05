@@ -846,6 +846,15 @@ no separate process, no build step, no Node. Three views:
   pipeline's *entire* output, not a share of it, so all of a node's
   outbound ribbons fan out from the same point at its vertical center
   instead of competing for space as if they were additive.
+  Every node and ribbon also shows a percentage alongside its raw
+  count -- of total ingested logs (every receiver's `events_in`
+  summed), the one number in the diagram that's never inflated by a
+  pipeline replicating its output to more than one exporter. That
+  makes a node's relative size legible as a number, not just a ribbon
+  width to eyeball against its neighbors -- and it's normal for a
+  pipeline or exporter to show *over* 100% (a pipeline feeding two
+  exporters sends each of them its whole output, not half), which is
+  real fan-out amplification, not a bug.
 
 Keyboard shortcuts (press `?` anywhere in the UI for a reminder): `h`/
 `l`/`t` jump to Health/Logs/Topology, `/` focuses the Logs search box,

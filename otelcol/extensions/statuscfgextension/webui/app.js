@@ -410,7 +410,7 @@
     var y = Math.max((canvasHeight - contentHeight) / 2, 0);
     return list.map(function (nd) {
       var height = nodeH + nd.flow * pxPerEvent;
-      var box = { id: nd.id, flow: nd.flow, color: nd.color, x: x, y: y, height: height, inCursor: 0 };
+      var box = { id: nd.id, flow: nd.flow, pct: nd.pct, color: nd.color, x: x, y: y, height: height, inCursor: 0 };
       y += height + NODE_GAP;
       return box;
     });
@@ -425,8 +425,23 @@
       '<foreignObject x="' + box.x + '" y="' + box.y + '" width="' + NODE_W + '" height="' + h + '">' +
       '<div xmlns="http://www.w3.org/1999/xhtml" class="sankey-label" title="' + escapeHTML(box.id) + '">' +
       '<span class="sankey-label-name">' + escapeHTML(box.id) + '</span>' +
-      '<span class="sankey-label-count">' + box.flow + '</span>' +
+      '<span class="sankey-label-count">' + box.flow + pctSuffix(box.pct) + '</span>' +
       '</div></foreignObject></g>';
+  }
+
+  // Width already scales exactly with the real count (one shared
+  // px-per-event factor, no per-column normalizing), so a 90%-of-total
+  // ribbon is already ~9x the pixels of a 10%-of-total one -- this just
+  // makes that relationship legible as a number instead of relying on
+  // eyeballing two ribbon widths against each other. "Total" here is
+  // total ingested logs (every receiver's events_in summed) -- the one
+  // number that isn't inflated by a pipeline replicating its output to
+  // multiple exporters, so it stays a stable 100% reference throughout
+  // the diagram. A pipeline/exporter can legitimately show *over* 100%
+  // (e.g. a pipeline feeding two exporters sends each of them its whole
+  // output) -- that's real amplification from fan-out, not a bug.
+  function pctSuffix(pct) {
+    return typeof pct === "number" ? " (" + pct + "%)" : "";
   }
 
   function sankeyLinkSVG(link) {
@@ -439,7 +454,8 @@
       " L" + link.tx + "," + y1bot +
       " C" + midX + "," + y1bot + " " + midX + "," + y0bot + " " + link.sx + "," + y0bot + " Z";
     var fillStyle = link.color ? ' style="fill:' + link.color + '"' : "";
-    return '<path d="' + d + '" class="sankey-link"' + fillStyle + '><title>' + escapeHTML(link.from + " → " + link.to + ": " + link.flow) + "</title></path>";
+    var title = link.from + " → " + link.to + ": " + link.flow + pctSuffix(link.pct);
+    return '<path d="' + d + '" class="sankey-link"' + fillStyle + '><title>' + escapeHTML(title) + "</title></path>";
   }
 
   function renderTopology(graph, status) {
@@ -461,6 +477,16 @@
     pipe.forEach(function (p, i) { p.color = SANKEY_PALETTE[i % SANKEY_PALETTE.length]; });
     var exp = nodesByType.exporter.map(function (n) { return { id: n.id, flow: flowFor(status, "exporter", n.id) }; })
       .sort(function (a, b) { return b.flow - a.flow || a.id.localeCompare(b.id); });
+
+    // Total ingested logs (every receiver's events_in, summed) -- the
+    // one number in this diagram that's never inflated by a pipeline
+    // replicating its output to more than one exporter, so it's a
+    // stable "100%" reference for every node and ribbon below.
+    var totalLogs = sumFlow(recv);
+    function pctOf(flow) { return totalLogs > 0 ? Math.round((flow / totalLogs) * 100) : 0; }
+    recv.forEach(function (n) { n.pct = pctOf(n.flow); });
+    pipe.forEach(function (n) { n.pct = pctOf(n.flow); });
+    exp.forEach(function (n) { n.pct = pctOf(n.flow); });
 
     // One shared scale across the whole diagram (not per-column) so a
     // link's width matches at both ends instead of visibly tapering.
@@ -510,7 +536,7 @@
       // that a connection exists structurally, whether or not it's
       // carrying traffic right now.
       var w = Math.max(flow * pxPerEvent, 2);
-      return { s: s, t: t, w: w, color: color, from: e.from, to: e.to, flow: flow };
+      return { s: s, t: t, w: w, color: color, from: e.from, to: e.to, flow: flow, pct: pctOf(flow) };
     }).filter(Boolean);
 
     // Incoming edges into a node are a real merge of distinct upstream
@@ -537,7 +563,7 @@
       var sy = s.y + s.height / 2;
       var ty = t.y + t.inCursor + w / 2;
       t.inCursor += w;
-      return { sx: s.x + NODE_W, sy: sy, tx: t.x, ty: ty, w: w, color: l.color, from: l.from, to: l.to, flow: l.flow };
+      return { sx: s.x + NODE_W, sy: sy, tx: t.x, ty: ty, w: w, color: l.color, from: l.from, to: l.to, flow: l.flow, pct: l.pct };
     });
 
     var svg = '<svg viewBox="0 0 ' + SANKEY_W + ' ' + canvasHeight + '" class="sankey-svg" preserveAspectRatio="xMinYMin meet">' +
