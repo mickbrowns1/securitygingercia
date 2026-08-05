@@ -309,4 +309,10 @@ cat <<EOF
   5. Watch it run:
        sgcia dashboard --status-addr 127.0.0.1:7801
      ...or open http://127.0.0.1:7801/ in a browser once it's running.
+
+Optional: to see this agent alongside others in a central fleet view,
+uncomment fleet_server_url/fleet_token in /etc/sgcia/config.yaml -- see
+README.md's "Fleet management" section first (it's a real security-
+posture change: this is the only thing here that gives the agent an
+outbound network dependency).
 EOF

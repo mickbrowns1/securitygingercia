@@ -22,6 +22,16 @@ type Config struct {
 	// config), scraped on every /status request and reshaped into the
 	// dashboard's expected snapshot shape.
 	MetricsURL string `mapstructure:"metrics_url"`
+
+	// FleetServerURL is the OpAMP WebSocket endpoint of a central
+	// sgcia-fleet-server (e.g. "ws://fleet.example.com:4320/v1/opamp").
+	// Empty (the default) disables fleet reporting entirely -- this is an
+	// explicit opt-in, not something every install takes on.
+	FleetServerURL string `mapstructure:"fleet_server_url"`
+
+	// FleetToken is sent as a bearer token when connecting to
+	// FleetServerURL. Only meaningful if FleetServerURL is set.
+	FleetToken string `mapstructure:"fleet_token"`
 }
 
 func (c *Config) Validate() error {

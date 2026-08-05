@@ -14,13 +14,15 @@ import (
 )
 
 type statusCfgExtension struct {
-	cfg       *Config
-	logger    *zap.Logger
-	server    *http.Server
-	listener  net.Listener
-	startedAt time.Time
-	resolved  *resolvedConfig
-	buffer    *logBuffer
+	cfg          *Config
+	logger       *zap.Logger
+	buildVersion string
+	server       *http.Server
+	listener     net.Listener
+	startedAt    time.Time
+	resolved     *resolvedConfig
+	buffer       *logBuffer
+	opamp        *opampReporter
 }
 
 // listenerAddr returns the actual bound address, useful in tests that ask
@@ -29,8 +31,8 @@ func (e *statusCfgExtension) listenerAddr() string {
 	return e.listener.Addr().String()
 }
 
-func newStatusCfgExtension(cfg *Config, logger *zap.Logger) *statusCfgExtension {
-	return &statusCfgExtension{cfg: cfg, logger: logger, buffer: newLogBuffer()}
+func newStatusCfgExtension(cfg *Config, logger *zap.Logger, buildVersion string) *statusCfgExtension {
+	return &statusCfgExtension{cfg: cfg, logger: logger, buildVersion: buildVersion, buffer: newLogBuffer()}
 }
 
 func (e *statusCfgExtension) Start(_ context.Context, _ component.Host) error {
@@ -60,10 +62,17 @@ func (e *statusCfgExtension) Start(_ context.Context, _ component.Host) error {
 			e.logger.Error("statuscfg server error", zap.Error(err))
 		}
 	}()
+
+	opamp, err := startOpampReporter(e.cfg, e.logger, e.cfg.Endpoint, e.buildVersion, e.buildSnapshot)
+	if err != nil {
+		return fmt.Errorf("statuscfg: starting fleet reporter: %w", err)
+	}
+	e.opamp = opamp
 	return nil
 }
 
 func (e *statusCfgExtension) Shutdown(ctx context.Context) error {
+	e.opamp.stop()
 	if e.server == nil {
 		return nil
 	}

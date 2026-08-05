@@ -24,7 +24,7 @@ func TestExtension_StatusAndConfigEndToEnd(t *testing.T) {
 		ConfigPath: configPath,
 		MetricsURL: metrics.URL,
 	}
-	ext := newStatusCfgExtension(cfg, zap.NewNop())
+	ext := newStatusCfgExtension(cfg, zap.NewNop(), "test")
 	if err := ext.Start(context.Background(), nil); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestExtension_LogsGetAndDeleteEndToEnd(t *testing.T) {
 	defer metrics.Close()
 
 	cfg := &Config{Endpoint: "127.0.0.1:0", ConfigPath: configPath, MetricsURL: metrics.URL}
-	ext := newStatusCfgExtension(cfg, zap.NewNop())
+	ext := newStatusCfgExtension(cfg, zap.NewNop(), "test")
 	if err := ext.Start(context.Background(), nil); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

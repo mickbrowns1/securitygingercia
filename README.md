@@ -48,6 +48,7 @@ run. Two binaries:
 - [Uninstalling](#uninstalling)
 - [The status endpoint](#the-status-endpoint)
 - [The web UI](#the-web-ui)
+- [Fleet management (optional)](#fleet-management-optional)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
 - [Manual installation (MANUAL.md)](MANUAL.md)
@@ -919,6 +920,60 @@ overlay if it's open).
 This is a read-only companion to `sgcia dashboard`/`sgcia edit`, not a
 replacement -- the TUIs still work exactly as before, and the web UI is
 just another way to look at the same loopback-only endpoints.
+
+## Fleet management (optional)
+
+Every agent above is fully independent by default -- no cross-host
+visibility, no central inventory. `fleet/sgcia-fleet-server/` is an
+optional, separately-run central service that gives you that: point one
+or more `sgcia-otelcol` agents at it and see them all in one place --
+hostname, version, health, and a live metrics snapshot -- with a
+drill-down hint into each agent's own web UI above.
+
+**Off by default, and a real security-posture change if you turn it
+on.** Enabling it is the only thing in this project that gives an agent
+an outbound network dependency -- every other endpoint here (`/status`,
+`/config`, the web UI) stays loopback-only, by the same design as
+always. Fleet reporting is one additional outbound connection *from* the
+agent *to* the fleet server (WebSocket, agent-dials-out -- no inbound
+port opens on the agent itself, so hosts behind NAT/firewalls with only
+outbound access still work). Don't enable this without deciding where
+the fleet server itself will run and who's responsible for keeping it
+up -- it's real infrastructure, not just a config flag.
+
+This is Phase 1: read-only inventory and health reporting only. There's
+no remote config push, no groups/tags, no fleet-wide log/topology view
+yet -- an agent enrolled today can be seen, not centrally managed.
+
+To run the fleet server:
+
+```bash
+cd fleet/sgcia-fleet-server
+go build -o sgcia-fleet-server .
+SGCIA_FLEET_TOKEN=<a-real-secret> ./sgcia-fleet-server -listen 0.0.0.0:4320 -db sgcia-fleet.db
+```
+
+Then open `http://<fleet-server-host>:4320/` for the agent list. Leave
+`SGCIA_FLEET_TOKEN` unset only for local testing -- with it unset, any
+agent that can reach the listener can enroll, unauthenticated.
+
+To enroll an agent, uncomment and fill in the two `statuscfg` fields in
+`/etc/sgcia/config.yaml` (see the commented block in
+`otelcol/config/example.yaml`):
+
+```yaml
+statuscfg:
+  # ...existing fields...
+  fleet_server_url: ws://<fleet-server-host>:4320/v1/opamp
+  fleet_token: ${FLEET_TOKEN}
+```
+
+`fleet_token` is read like any other secret here -- via `${VAR}`
+substitution from the environment (`/etc/sgcia/sgcia.env` under
+systemd; see [Secrets](#secrets)), matching the `S1_HEC_TOKEN`/
+`SPLUNK_HEC_TOKEN` pattern above rather than a literal value in the
+file. Restart the agent after editing; it reports in on its own from
+then on, roughly every 15 seconds.
 
 ## Troubleshooting
 
