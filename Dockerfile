@@ -19,11 +19,18 @@ RUN dnf install -y golang git gcc make rust cargo && dnf clean all
 WORKDIR /src
 COPY . .
 
-# The Go otelcol distribution -- OCB (the OpenTelemetry Collector Builder)
-# already generated otelcol/dist/{main.go,go.mod,go.sum,components.go} (see
-# builder-config.yaml's output_path), so a plain `go build` there reproduces
-# the exact binary `ocb` would.
-RUN cd otelcol/dist && go build -o /out/sgcia-otelcol .
+# otelcol/dist/ (main.go, go.mod, go.sum, components.go, and the compiled
+# binary itself) is gitignored -- OCB (the OpenTelemetry Collector Builder)
+# regenerates it from otelcol/builder-config.yaml, so it isn't in this
+# checkout and has to be built fresh here. Same recipe as install.sh/
+# MANUAL.md's manual build step, including the GOTOOLCHAIN pin -- without
+# it, a fresh go.mod's toolchain directive can trigger Go's automatic
+# toolchain download, which fails on some arch/network combinations (see
+# README.md's Troubleshooting section, "toolchain not available").
+RUN go install go.opentelemetry.io/collector/cmd/builder@latest
+RUN mkdir -p /out && cd otelcol \
+    && GOTOOLCHAIN=go1.25.12 "$(go env GOPATH)/bin/builder" --config builder-config.yaml \
+    && cp dist/sgcia-otelcol /out/sgcia-otelcol
 
 # The Rust companion (dashboard/edit TUI) -- workspace build, release profile.
 RUN cargo build --release && cp target/release/sgcia /out/sgcia
