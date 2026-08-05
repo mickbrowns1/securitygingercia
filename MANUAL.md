@@ -61,6 +61,36 @@ Go 1.21+ is enough) is fine to *start* with. If your distro's package is
 genuinely too old (pre-1.21) or unavailable, install directly from
 [go.dev/doc/install](https://go.dev/doc/install) instead.
 
+**Prerequisite: Node.js**, to build the embedded web UI --
+`sgcia-otelcol` embeds its compiled output (`go:embed`), so this has to
+happen *before* the builder step below, not after. Check with `node
+--version` first; if that says `command not found`:
+
+```bash
+# Debian / Ubuntu
+sudo apt update && sudo apt install -y nodejs npm
+
+# Fedora / RHEL / CentOS
+sudo dnf install -y nodejs npm
+
+# Arch
+sudo pacman -S --needed nodejs npm
+
+# macOS
+brew install node
+```
+
+```bash
+cd otelcol/extensions/statuscfgextension/webui-react
+npm ci
+npm run build
+cd ../../../..
+```
+
+This produces `webui-react/dist/`, which the builder step below
+embeds into the binary -- see `webui-react/README.md` if you're
+editing the UI itself, not just building it once.
+
 Install the builder tool once, then run it against this repo's manifest:
 
 ```bash
@@ -198,8 +228,10 @@ also why there are two example configs:
 the Windows one here, not the plain one.
 
 In a PowerShell prompt, with [Git](https://git-scm.com/downloads/win),
-[Go](https://go.dev/doc/install), and the
-[Rust toolchain](https://rustup.rs) installed (all three ship native
+[Go](https://go.dev/doc/install), [Node.js](https://nodejs.org/)
+(builds the embedded web UI -- `sgcia-otelcol` embeds its compiled
+output, so this has to happen before the builder step below), and the
+[Rust toolchain](https://rustup.rs) installed (all four ship native
 Windows installers -- no build-essential/xcode-select equivalent needed,
 MSVC's linker comes with the Rust installer's prompt to also install the
 Visual Studio Build Tools if you don't already have a C++ toolchain):
@@ -207,6 +239,11 @@ Visual Studio Build Tools if you don't already have a C++ toolchain):
 ```powershell
 git clone https://github.com/mickbrowns1/securitygingercia.git
 cd securitygingercia
+
+cd otelcol\extensions\statuscfgextension\webui-react
+npm ci
+npm run build
+cd ..\..\..\..
 
 go install go.opentelemetry.io/collector/cmd/builder@latest
 cd otelcol

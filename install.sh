@@ -6,9 +6,10 @@
 #   ./install.sh                 # from inside an existing checkout
 #   curl -fsSL .../install.sh | bash   # clones the repo first if needed
 #
-# What it does, in order: installs git/Go/a C toolchain/Rust if missing,
-# builds sgcia-otelcol (via the OpenTelemetry Collector Builder) and sgcia
-# (via cargo), installs both to /usr/local/bin, creates /etc/sgcia +
+# What it does, in order: installs git/Go/Node/a C toolchain/Rust if
+# missing, builds the embedded web UI (npm), then sgcia-otelcol (via the
+# OpenTelemetry Collector Builder, which embeds that web UI build) and
+# sgcia (via cargo), installs both to /usr/local/bin, creates /etc/sgcia +
 # /var/lib/sgcia, and (on systemd Linux) sets up and enables the sgcia
 # service -- enabled, not started, since the starter config it drops in
 # still has placeholder secrets/paths. It deliberately stops there --
@@ -123,6 +124,28 @@ else
   esac
 fi
 have go || die "Go still not found after install -- see README.md's Installing section."
+
+step "Checking for Node.js (builds the embedded web UI)"
+if have node; then
+  info "found: $(node --version)"
+else
+  case "$OS" in
+    Linux)
+      case "$DISTRO" in
+        ubuntu|debian) pkg_install Node.js nodejs npm ;;
+        fedora|rhel|centos|rocky|almalinux) pkg_install Node.js nodejs npm ;;
+        arch) pkg_install Node.js nodejs npm ;;
+      esac
+      ;;
+    Darwin) pkg_install Node.js node ;;
+  esac
+fi
+have node || die "Node still not found after install -- see README.md's Installing section."
+
+step "Building the web UI (npm ci && npm run build)"
+(cd "$REPO_ROOT/otelcol/extensions/statuscfgextension/webui-react" && npm ci && npm run build)
+[ -d "$REPO_ROOT/otelcol/extensions/statuscfgextension/webui-react/dist" ] || die "web UI build didn't produce a dist/ directory -- check the output above."
+info "built: $REPO_ROOT/otelcol/extensions/statuscfgextension/webui-react/dist"
 
 step "Installing the OpenTelemetry Collector Builder tool"
 go install go.opentelemetry.io/collector/cmd/builder@latest
