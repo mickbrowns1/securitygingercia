@@ -1,10 +1,12 @@
 use crate::editor::app::{App, FieldEditState, FormState, Screen, TopTab};
 use crate::editor::schema_registry::{self, ComponentCategory};
+use crate::editor::templates::{self, TemplateCategory};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
+use serde_json::Value;
 
 const PIPELINE_DESCRIPTION: &str = "A pipeline wires everything together: events come in from the listed receivers and get sent out to the listed exporters. Per-receiver parsing is configured on each receiver itself (its operators field), not here.";
 
@@ -50,6 +52,21 @@ pub fn draw(frame: &mut Frame, app: &App) {
             let description = op_form.type_name.map(describe_operator_type).unwrap_or("");
             draw_form(frame, chunks[0], &format!("editing operator on {id}"), description, op_form)
         }
+        Screen::TemplateBrowse { selected } => draw_template_browse(frame, chunks[0], *selected),
+        Screen::NameTemplateReceiver { template_key, input } => draw_name_prompt(
+            frame,
+            chunks[0],
+            "new receiver id",
+            input.value(),
+            templates::find(template_key).map(|t| t.description).unwrap_or(""),
+        ),
+        Screen::EditTemplateParams { template_key, id, form } => {
+            let template = templates::find(template_key);
+            let title = template.map(|t| t.title).unwrap_or(template_key);
+            let description = template.map(|t| t.description).unwrap_or("");
+            draw_form(frame, chunks[0], &format!("{title} -- {id}"), description, form)
+        }
+        Screen::ReviewTemplateReceiver { id, receiver, .. } => draw_template_review(frame, chunks[0], id, receiver),
     }
 
     draw_status_bar(frame, chunks[1], app);
@@ -107,11 +124,12 @@ fn draw_top_level(frame: &mut Frame, area: Rect, app: &App, tab: TopTab, selecte
             })
             .collect()
     };
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("a: add  Enter: edit  d: remove  s: save  Tab: switch  ?: help  q: quit"),
-    );
+    let title = if tab == TopTab::Receivers {
+        "a: add  T: from template  Enter: edit  d: remove  s: save  Tab: switch  ?: help  q: quit"
+    } else {
+        "a: add  Enter: edit  d: remove  s: save  Tab: switch  ?: help  q: quit"
+    };
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(list, chunks[1]);
 }
 
@@ -183,6 +201,59 @@ fn draw_type_list(
             .wrap(Wrap { trim: true }),
         chunks[1],
     );
+}
+
+fn draw_template_browse(frame: &mut Frame, area: Rect, selected: usize) {
+    let all = templates::SOURCE_TEMPLATES;
+    let block = Block::default().borders(Borders::ALL).title(
+        "pick a source template (Up/Down to move, Enter to confirm, ? for help, Esc to cancel)",
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Category heading rows are interspersed but not selectable -- the
+    // list index and `selected` both stay plain indices into
+    // SOURCE_TEMPLATES itself (see `App::handle_template_browse`), so
+    // headings are only ever inserted, never counted.
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut last_category: Option<TemplateCategory> = None;
+    for (i, template) in all.iter().enumerate() {
+        if last_category != Some(template.category) {
+            items.push(ListItem::new(Span::styled(
+                template.category.label(),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )));
+            last_category = Some(template.category);
+        }
+        let style = if i == selected {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        items.push(ListItem::new(format!("  {} [{}]", template.title, template.receiver_type)).style(style));
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(items.len().max(1) as u16), Constraint::Min(2)])
+        .split(inner);
+    frame.render_widget(List::new(items), chunks[0]);
+
+    let description = all.get(selected).map(|t| t.description).unwrap_or("");
+    frame.render_widget(
+        Paragraph::new(description).style(Style::default().fg(Color::Cyan)).wrap(Wrap { trim: true }),
+        chunks[1],
+    );
+}
+
+fn draw_template_review(frame: &mut Frame, area: Rect, id: &str, receiver: &Value) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!("review {id} -- Enter: confirm and insert  Esc: back to params"));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let yaml = serde_yaml_ng::to_string(receiver).unwrap_or_default();
+    frame.render_widget(Paragraph::new(yaml), inner);
 }
 
 fn draw_name_prompt(frame: &mut Frame, area: Rect, title: &str, value: &str, description: &str) {
@@ -292,6 +363,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         row("Tab/Shift+Tab, Up/Down", "switch tabs, move selection"),
         row("Enter, a, d/Delete", "edit / add / remove the selected item"),
         row("s, ?, q/Esc", "save to disk, help, quit"),
+        row("T (Receivers tab only)", "browse curated source templates -- name, fill params, review, insert"),
         heading("Editing a component's fields / a pipeline's operators list"),
         row("Tab/Shift+Tab, Left/Right", "next/prev field, cycle enum/bool"),
         row("Enter, Esc", "save (or manage operators list) / discard"),
@@ -513,5 +585,27 @@ service:
         app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter));
         let content = render_to_string(&app);
         assert!(content.contains("0: add"));
+    }
+
+    #[test]
+    fn template_browse_shows_category_headings_and_selected_description() {
+        let mut app = App::new(PathBuf::from("x.yaml"), EditorDoc::new());
+        app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('T')));
+        let content = render_to_string(&app);
+        assert!(content.contains("Network & security devices"));
+        assert!(content.contains("Cisco ASA"));
+        assert!(content.contains("%ASA-severity-msgid"));
+    }
+
+    #[test]
+    fn template_review_shows_generated_yaml_for_confirmation() {
+        let mut app = App::new(PathBuf::from("x.yaml"), EditorDoc::new());
+        app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('T')));
+        app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter)); // NameTemplateReceiver
+        app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter)); // EditTemplateParams
+        app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter)); // -> ReviewTemplateReceiver
+        let content = render_to_string(&app);
+        assert!(content.contains("review syslog/cisco_asa"));
+        assert!(content.contains("regex_parser"));
     }
 }

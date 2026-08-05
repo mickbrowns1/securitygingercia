@@ -711,9 +711,104 @@ pub fn component_type(id: &str) -> &str {
     id.split('/').next().unwrap_or(id)
 }
 
+/// Test-only helpers for validating a generated config against the real
+/// `sgcia-otelcol` binary -- `pub(crate)` (not `#[cfg(test)] mod tests`
+/// only) so `templates.rs`'s own drift test can reuse them too, rather
+/// than duplicating this wiring.
+#[cfg(test)]
+pub(crate) mod test_support {
+    /// Builds a minimal but complete otelcol config: the given receivers/
+    /// exporters/extensions, wired into a single `logs/test` pipeline
+    /// referencing the given receiver/exporter ids (extensions, if any,
+    /// are always activated via `service.extensions`).
+    pub(crate) fn wrap_in_full_config(
+        receivers: impl IntoIterator<Item = (String, serde_json::Value)>,
+        exporters: impl IntoIterator<Item = (String, serde_json::Value)>,
+        extensions: &[(String, serde_json::Value)],
+        pipeline_receivers: impl IntoIterator<Item = String>,
+        pipeline_exporters: impl IntoIterator<Item = String>,
+    ) -> serde_json::Value {
+        let mut root = serde_json::Map::new();
+        root.insert(
+            "receivers".to_string(),
+            serde_json::Value::Object(receivers.into_iter().collect()),
+        );
+        root.insert(
+            "exporters".to_string(),
+            serde_json::Value::Object(exporters.into_iter().collect()),
+        );
+        if !extensions.is_empty() {
+            root.insert(
+                "extensions".to_string(),
+                serde_json::Value::Object(extensions.iter().cloned().collect()),
+            );
+        }
+        let mut pipeline = serde_json::Map::new();
+        pipeline.insert(
+            "receivers".to_string(),
+            serde_json::Value::Array(pipeline_receivers.into_iter().map(|s| serde_json::json!(s)).collect()),
+        );
+        pipeline.insert(
+            "exporters".to_string(),
+            serde_json::Value::Array(pipeline_exporters.into_iter().map(|s| serde_json::json!(s)).collect()),
+        );
+        let mut pipelines = serde_json::Map::new();
+        pipelines.insert("logs/test".to_string(), serde_json::Value::Object(pipeline));
+        let mut service = serde_json::Map::new();
+        if !extensions.is_empty() {
+            service.insert(
+                "extensions".to_string(),
+                serde_json::Value::Array(
+                    extensions.iter().map(|(id, _)| serde_json::json!(id)).collect(),
+                ),
+            );
+        }
+        service.insert("pipelines".to_string(), serde_json::Value::Object(pipelines));
+        root.insert("service".to_string(), serde_json::Value::Object(service));
+        serde_json::Value::Object(root)
+    }
+
+    pub(crate) fn test_otelcol_binary_path() -> std::path::PathBuf {
+        if let Ok(p) = std::env::var("SGCIA_OTELCOL_BIN") {
+            return std::path::PathBuf::from(p);
+        }
+        // `cargo test` runs test binaries with cwd set to this crate's own
+        // manifest directory (crates/collector), not the workspace root,
+        // so a plain relative "otelcol/dist/..." never resolves here --
+        // anchor to CARGO_MANIFEST_DIR (set at compile time) instead.
+        let dev_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../otelcol/dist/sgcia-otelcol");
+        if dev_path.exists() {
+            return dev_path;
+        }
+        std::path::PathBuf::from("sgcia-otelcol")
+    }
+
+    pub(crate) fn assert_validates(bin: &std::path::Path, config: &serde_json::Value, type_name: &str) {
+        use std::io::Write;
+        let yaml_text = serde_yaml_ng::to_string(config).unwrap();
+        let mut tmp = tempfile::Builder::new().suffix(".yaml").tempfile().unwrap();
+        tmp.write_all(yaml_text.as_bytes()).unwrap();
+        tmp.flush().unwrap();
+
+        let output = std::process::Command::new(bin)
+            .arg("validate")
+            .arg("--config")
+            .arg(format!("file:{}", tmp.path().display()))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{type_name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use test_support::{assert_validates, test_otelcol_binary_path, wrap_in_full_config};
 
     #[test]
     fn every_field_and_type_has_help_text() {
@@ -850,92 +945,5 @@ mod tests {
         let seed = minimal_value(spec);
         crate::editor::app::FormState::new(Some(spec.type_name), write_type_key, spec.fields, &seed)
             .to_value()
-    }
-
-    /// Builds a minimal but complete otelcol config: the given receivers/
-    /// exporters/extensions, wired into a single `logs/test` pipeline
-    /// referencing the given receiver/exporter ids (extensions, if any,
-    /// are always activated via `service.extensions`).
-    fn wrap_in_full_config(
-        receivers: impl IntoIterator<Item = (String, serde_json::Value)>,
-        exporters: impl IntoIterator<Item = (String, serde_json::Value)>,
-        extensions: &[(String, serde_json::Value)],
-        pipeline_receivers: impl IntoIterator<Item = String>,
-        pipeline_exporters: impl IntoIterator<Item = String>,
-    ) -> serde_json::Value {
-        let mut root = serde_json::Map::new();
-        root.insert(
-            "receivers".to_string(),
-            serde_json::Value::Object(receivers.into_iter().collect()),
-        );
-        root.insert(
-            "exporters".to_string(),
-            serde_json::Value::Object(exporters.into_iter().collect()),
-        );
-        if !extensions.is_empty() {
-            root.insert(
-                "extensions".to_string(),
-                serde_json::Value::Object(extensions.iter().cloned().collect()),
-            );
-        }
-        let mut pipeline = serde_json::Map::new();
-        pipeline.insert(
-            "receivers".to_string(),
-            serde_json::Value::Array(pipeline_receivers.into_iter().map(|s| serde_json::json!(s)).collect()),
-        );
-        pipeline.insert(
-            "exporters".to_string(),
-            serde_json::Value::Array(pipeline_exporters.into_iter().map(|s| serde_json::json!(s)).collect()),
-        );
-        let mut pipelines = serde_json::Map::new();
-        pipelines.insert("logs/test".to_string(), serde_json::Value::Object(pipeline));
-        let mut service = serde_json::Map::new();
-        if !extensions.is_empty() {
-            service.insert(
-                "extensions".to_string(),
-                serde_json::Value::Array(
-                    extensions.iter().map(|(id, _)| serde_json::json!(id)).collect(),
-                ),
-            );
-        }
-        service.insert("pipelines".to_string(), serde_json::Value::Object(pipelines));
-        root.insert("service".to_string(), serde_json::Value::Object(service));
-        serde_json::Value::Object(root)
-    }
-
-    fn test_otelcol_binary_path() -> std::path::PathBuf {
-        if let Ok(p) = std::env::var("SGCIA_OTELCOL_BIN") {
-            return std::path::PathBuf::from(p);
-        }
-        // `cargo test` runs test binaries with cwd set to this crate's own
-        // manifest directory (crates/collector), not the workspace root,
-        // so a plain relative "otelcol/dist/..." never resolves here --
-        // anchor to CARGO_MANIFEST_DIR (set at compile time) instead.
-        let dev_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../otelcol/dist/sgcia-otelcol");
-        if dev_path.exists() {
-            return dev_path;
-        }
-        std::path::PathBuf::from("sgcia-otelcol")
-    }
-
-    fn assert_validates(bin: &std::path::Path, config: &serde_json::Value, type_name: &str) {
-        use std::io::Write;
-        let yaml_text = serde_yaml_ng::to_string(config).unwrap();
-        let mut tmp = tempfile::Builder::new().suffix(".yaml").tempfile().unwrap();
-        tmp.write_all(yaml_text.as_bytes()).unwrap();
-        tmp.flush().unwrap();
-
-        let output = std::process::Command::new(bin)
-            .arg("validate")
-            .arg("--config")
-            .arg(format!("file:{}", tmp.path().display()))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{type_name}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
     }
 }

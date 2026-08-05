@@ -1,5 +1,6 @@
 use crate::editor::model::EditorDoc;
 use crate::editor::schema_registry::{self, ComponentCategory, FieldKind, FieldSpec};
+use crate::editor::templates;
 use crossterm::event::{Event, KeyCode, KeyEvent};
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
@@ -297,6 +298,16 @@ pub enum Screen {
         index: Option<usize>,
         op_form: FormState,
     },
+    /// Curated source-template flow (Receivers tab only, key `T`):
+    /// browse -> name -> fill params -> review the generated receiver ->
+    /// confirm insert. See `templates.rs`.
+    TemplateBrowse { selected: usize },
+    NameTemplateReceiver { template_key: &'static str, input: Input },
+    EditTemplateParams { template_key: &'static str, id: String, form: FormState },
+    /// `params` is kept (not just the built `receiver`) so Esc here can
+    /// return to `EditTemplateParams` pre-filled with what was already
+    /// typed, instead of resetting to blank defaults.
+    ReviewTemplateReceiver { template_key: &'static str, id: String, params: Value, receiver: Value },
 }
 
 impl Default for Screen {
@@ -344,6 +355,7 @@ impl App {
                 | Screen::ConfirmRemove { .. }
                 | Screen::OperatorList { .. }
                 | Screen::OperatorPickType { .. }
+                | Screen::TemplateBrowse { .. }
         )
     }
 
@@ -494,6 +506,70 @@ impl App {
                     Screen::OperatorList { category, id, form, selected }
                 }
             },
+            Screen::TemplateBrowse { selected } => self.handle_template_browse(selected, key),
+            Screen::NameTemplateReceiver { template_key, mut input } => match key.code {
+                KeyCode::Esc => Screen::TopLevel { tab: TopTab::Receivers, selected: 0 },
+                KeyCode::Enter => {
+                    let id = input.value().trim().to_string();
+                    if id.is_empty() || self.doc.receivers.contains_key(&id) {
+                        self.status_message = Some(format!("'{id}' is empty or already exists"));
+                        Screen::NameTemplateReceiver { template_key, input }
+                    } else {
+                        let template = templates::find(template_key).expect("template_key comes from the registry");
+                        let form = FormState::new(None, false, template.params, &json!({}));
+                        Screen::EditTemplateParams { template_key, id, form }
+                    }
+                }
+                _ => {
+                    input.handle_event(&Event::Key(key));
+                    Screen::NameTemplateReceiver { template_key, input }
+                }
+            },
+            Screen::EditTemplateParams { template_key, id, mut form } => match form.on_key(key) {
+                FormOutcome::Continue => Screen::EditTemplateParams { template_key, id, form },
+                FormOutcome::Cancel => Screen::TopLevel { tab: TopTab::Receivers, selected: 0 },
+                FormOutcome::Submit => {
+                    let template = templates::find(template_key).expect("template_key comes from the registry");
+                    let params = form.to_value();
+                    let receiver = (template.build)(&params);
+                    Screen::ReviewTemplateReceiver { template_key, id, params, receiver }
+                }
+            },
+            Screen::ReviewTemplateReceiver { template_key, id, params, receiver } => match key.code {
+                KeyCode::Enter => {
+                    self.doc.receivers.insert(id.clone(), receiver);
+                    self.dirty = true;
+                    self.status_message = Some(format!("{id} created from template (press 's' to save to disk)"));
+                    Screen::TopLevel { tab: TopTab::Receivers, selected: 0 }
+                }
+                KeyCode::Esc => {
+                    let template = templates::find(template_key).expect("template_key comes from the registry");
+                    let form = FormState::new(None, false, template.params, &params);
+                    Screen::EditTemplateParams { template_key, id, form }
+                }
+                _ => Screen::ReviewTemplateReceiver { template_key, id, params, receiver },
+            },
+        }
+    }
+
+    fn handle_template_browse(&mut self, selected: usize, key: KeyEvent) -> Screen {
+        let list = templates::SOURCE_TEMPLATES;
+        match key.code {
+            KeyCode::Esc => Screen::TopLevel { tab: TopTab::Receivers, selected: 0 },
+            KeyCode::Down => Screen::TemplateBrowse {
+                selected: if list.is_empty() { 0 } else { (selected + 1).min(list.len() - 1) },
+            },
+            KeyCode::Up => Screen::TemplateBrowse { selected: selected.saturating_sub(1) },
+            KeyCode::Enter => {
+                let Some(template) = list.get(selected) else {
+                    return Screen::TemplateBrowse { selected };
+                };
+                Screen::NameTemplateReceiver {
+                    template_key: template.key,
+                    input: Input::new(template.default_id.to_string()),
+                }
+            }
+            _ => Screen::TemplateBrowse { selected },
         }
     }
 
@@ -515,6 +591,7 @@ impl App {
                 Some(category) => Screen::PickType { category, selected: 0 },
                 None => Screen::NameNewPipeline { input: Input::default() },
             },
+            KeyCode::Char('T') if tab == TopTab::Receivers => Screen::TemplateBrowse { selected: 0 },
             KeyCode::Enter => {
                 let Some(id) = ids.get(selected).cloned() else {
                     return Screen::TopLevel { tab, selected };
@@ -944,5 +1021,64 @@ service:
             Screen::OperatorList { form, .. } => assert!(form.operators().is_empty()),
             _ => panic!("expected OperatorList"),
         }
+    }
+
+    #[test]
+    fn template_flow_creates_a_new_receiver_from_the_first_template() {
+        let mut app = App::new(PathBuf::from("x.yaml"), sample_doc());
+        app.on_key(key(KeyCode::Char('T')));
+        assert!(matches!(app.screen, Screen::TemplateBrowse { .. }));
+
+        app.on_key(key(KeyCode::Enter)); // pick the first template (cisco_asa) -> NameTemplateReceiver, prefilled
+        assert!(matches!(app.screen, Screen::NameTemplateReceiver { .. }));
+
+        app.on_key(key(KeyCode::Enter)); // accept the prefilled id -> EditTemplateParams
+        assert!(matches!(app.screen, Screen::EditTemplateParams { .. }));
+
+        app.on_key(key(KeyCode::Enter)); // submit params as-is (seeded defaults) -> ReviewTemplateReceiver
+        assert!(matches!(app.screen, Screen::ReviewTemplateReceiver { .. }));
+
+        app.on_key(key(KeyCode::Enter)); // confirm insert -> TopLevel
+        assert!(matches!(app.screen, Screen::TopLevel { tab: TopTab::Receivers, .. }));
+
+        let value = app.doc.receivers.get("syslog/cisco_asa").expect("receiver created from template");
+        assert_eq!(value["protocol"], "rfc3164");
+        assert!(value["operators"].as_array().unwrap().len() >= 3);
+    }
+
+    #[test]
+    fn esc_on_review_returns_to_params_with_previous_edits_preserved() {
+        let mut app = App::new(PathBuf::from("x.yaml"), sample_doc());
+        app.on_key(key(KeyCode::Char('T')));
+        app.on_key(key(KeyCode::Enter)); // NameTemplateReceiver
+        app.on_key(key(KeyCode::Enter)); // EditTemplateParams, focused on `transport` (first field)
+        app.on_key(key(KeyCode::Right)); // flip transport from udp -> tcp
+        app.on_key(key(KeyCode::Enter)); // submit -> ReviewTemplateReceiver
+        match &app.screen {
+            Screen::ReviewTemplateReceiver { receiver, .. } => {
+                assert!(receiver.get("tcp").is_some(), "tcp transport should be reflected in the built receiver");
+            }
+            _ => panic!("expected ReviewTemplateReceiver"),
+        }
+
+        app.on_key(key(KeyCode::Esc)); // back to EditTemplateParams, not reset to blank
+        match &app.screen {
+            Screen::EditTemplateParams { form, .. } => match &form.fields[0] {
+                FieldEditState::Enum { options, selected } => assert_eq!(options[*selected], "tcp"),
+                _ => panic!("expected Enum field"),
+            },
+            _ => panic!("expected EditTemplateParams"),
+        }
+    }
+
+    #[test]
+    fn capital_t_only_opens_template_browse_on_receivers_tab() {
+        let mut app = App::new(PathBuf::from("x.yaml"), sample_doc());
+        app.on_key(key(KeyCode::Tab)); // switch to Exporters tab
+        app.on_key(key(KeyCode::Char('T')));
+        assert!(
+            matches!(app.screen, Screen::TopLevel { tab: TopTab::Exporters, .. }),
+            "T should be a no-op outside the Receivers tab"
+        );
     }
 }

@@ -251,6 +251,26 @@ structured envelope needs no regex at all) -- see [the RFC
 3164/5424 mismatch entry](#troubleshooting) if you're not sure which
 your own sender actually speaks.
 
+#### Source templates
+
+`sgcia edit`'s Receivers tab has a `T` key (alongside `a` for a bare
+component) that browses a curated library of 13 source templates --
+Cisco ASA, Cisco Catalyst/IOS, Cisco Meraki, Ubiquiti/UniFi, HAProxy,
+CEF, generic RFC 5424 syslog, generic file tailing, JSON logs, W3C/IIS
+extended logs, nginx access logs, a Windows DHCP server audit log, and
+Active Directory (Windows Event Log) -- each producing a ready-to-use
+receiver, including its `operators:` chain, from a couple of typed
+parameters (a listen address, a file glob, a Windows channel) instead
+of making you hand-write a `regex_parser` from scratch. Pick one, name
+the new receiver, fill in its params, review the generated YAML, then
+confirm to insert it -- same `sgcia-otelcol validate` on save as
+anything else in this editor, so a template can't silently produce an
+invalid config. Some (Cisco ASA, CEF, the W3C/nginx/DHCP formats) match
+a fixed, documented message grammar exactly; others (Cisco Meraki,
+HAProxy) cover the common default but may need adjusting for your
+specific export settings -- each template's own description in the
+picker says which.
+
 `dataset` routes events differently than `splunk_hec` -- it has no
 config-driven attribute-to-metadata mapping at all (no
 `otel_attrs_to_hec_metadata` equivalent). The only routing metadata it
@@ -429,6 +449,7 @@ field is focused, so `?` still types normally there instead.
 | `Up` / `Down` | Move selection within the current tab |
 | `Enter` | Edit the selected item |
 | `a` | Add a new item (pick a type, name it, then edit its fields) |
+| `T` (Receivers tab only) | Add a receiver from a curated source template instead -- see below |
 | `d` / `Delete` | Remove the selected item (asks for confirmation if a pipeline still references it) |
 | `s` | Validate and save to disk |
 | `?` | Show the full keybinding reference |
@@ -455,6 +476,25 @@ Reached by pressing `Enter` on a receiver's `operators` field.
 | `Enter` | Edit the selected operator |
 | `d` / `Delete` | Remove the selected operator |
 | `Esc` | Back to the receiver's own form (focus moves off `operators`, so a follow-up `Enter` there submits the whole component instead of reopening this list) |
+
+#### Adding a receiver from a source template
+
+Reached by pressing `T` on the Receivers tab (see [Source
+templates](#source-templates) above for the full list) -- a shortcut for
+the common cases that skips hand-writing an `operators:` chain from
+scratch.
+
+| Key | Action |
+|---|---|
+| `Up` / `Down` | Move selection within the template list (grouped by category) |
+| `Enter` | Pick the highlighted template, or (later) confirm the params/review step |
+| `Esc` | Back one step (params -> back to the list; review -> back to params, keeping what you typed) |
+
+Flow: pick a template -> name the new receiver (pre-filled with a
+sensible default id, editable) -> fill in its few params -> review the
+generated receiver as YAML -> `Enter` to insert it, same as any other
+receiver from here on (editable via the normal form/operators screens,
+validated the same way on save).
 
 #### Editing a text field's contents
 

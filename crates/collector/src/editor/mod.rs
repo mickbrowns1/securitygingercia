@@ -5,6 +5,7 @@
 mod app;
 mod model;
 mod schema_registry;
+mod templates;
 mod ui;
 
 use app::App;
