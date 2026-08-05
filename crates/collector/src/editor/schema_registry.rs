@@ -187,7 +187,7 @@ const SPLUNK_HEC_FIELDS: &[FieldSpec] = &[
         FieldKind::Str,
         true,
         Some("https://example.invalid:8088/services/collector/event"),
-        "The full HEC ingest URL -- e.g. https://xdr.us1.sentinelone.net/services/collector/event.",
+        "The full HEC ingest URL -- e.g. https://ingest.na1.sentinelone.net/services/collector for SentinelOne DataPipeline.",
     ),
     f(
         "token",

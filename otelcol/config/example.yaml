@@ -163,7 +163,7 @@ receivers:
 
 exporters:
   splunk_hec/sentinelone:
-    endpoint: "https://xdr.us1.sentinelone.net/services/collector/event"
+    endpoint: "https://ingest.na1.sentinelone.net/services/collector"
     token: ${S1_HEC_TOKEN}
     # Leave source/sourcetype/index unmapped below -- since no attribute
     # literally named com.splunk.source/sourcetype/index exists on our log

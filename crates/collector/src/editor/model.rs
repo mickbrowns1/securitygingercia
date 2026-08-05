@@ -258,7 +258,7 @@ receivers:
     include: ["/var/log/app/*.log"]
 exporters:
   splunk_hec/sentinelone:
-    endpoint: "https://xdr.us1.sentinelone.net/services/collector/event"
+    endpoint: "https://ingest.na1.sentinelone.net/services/collector"
     token: ${S1_HEC_TOKEN}
 extensions:
   file_storage:
