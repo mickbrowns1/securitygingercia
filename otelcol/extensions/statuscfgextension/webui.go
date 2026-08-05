@@ -6,16 +6,18 @@ import (
 	"net/http"
 )
 
-// webUIFS holds the plain HTML/CSS/vanilla-JS single-page app served at "/"
-// -- a health dashboard, log viewer, and topology diagram, all backed by the
-// JSON endpoints already registered alongside it. Compiled into the binary,
-// no Node/build step involved.
+// webUIFS holds the React single-page app served at "/" -- a health
+// dashboard, log viewer, and topology diagram, all backed by the JSON
+// endpoints already registered alongside it. EXPERIMENTAL (branch
+// reactdontdoit): requires `npm run build` in webui-react/ before this
+// package builds, since it embeds that build's dist/ output rather than
+// flat source files -- see webui-react/README.md.
 //
-//go:embed webui/index.html webui/style.css webui/app.js
+//go:embed webui-react/dist
 var webUIFS embed.FS
 
 func webUIHandler() http.Handler {
-	assets, err := fs.Sub(webUIFS, "webui")
+	assets, err := fs.Sub(webUIFS, "webui-react/dist")
 	if err != nil {
 		// Only possible if the embed directive above and this Sub path
 		// disagree, which would be a build-time programming error, not a
