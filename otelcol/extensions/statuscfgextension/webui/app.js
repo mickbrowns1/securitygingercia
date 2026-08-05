@@ -410,7 +410,7 @@
     var y = Math.max((canvasHeight - contentHeight) / 2, 0);
     return list.map(function (nd) {
       var height = nodeH + nd.flow * pxPerEvent;
-      var box = { id: nd.id, flow: nd.flow, color: nd.color, x: x, y: y, height: height, inCursor: 0, outCursor: 0 };
+      var box = { id: nd.id, flow: nd.flow, color: nd.color, x: x, y: y, height: height, inCursor: 0 };
       y += height + NODE_GAP;
       return box;
     });
@@ -513,30 +513,28 @@
       return { s: s, t: t, w: w, color: color, from: e.from, to: e.to, flow: flow };
     }).filter(Boolean);
 
-    // A node's stack of ribbons defaults to hugging its top edge (cursor
-    // starts at 0), which looks disconnected once boxes are taller than
-    // the ribbons landing on them -- a single thin ribbon on a tall box
-    // would sit right at the top instead of the middle. Center each
-    // node's whole stack of attachment points within its own height.
-    function centerCursors(links, side) {
-      var totalBySide = {};
-      links.forEach(function (l) {
-        var node = side === "out" ? l.s : l.t;
-        totalBySide[node.id] = (totalBySide[node.id] || 0) + l.w;
-      });
-      Object.keys(totalBySide).forEach(function (id) {
-        var box = byId[id];
-        var cursorKey = side === "out" ? "outCursor" : "inCursor";
-        box[cursorKey] = Math.max((box.height - totalBySide[id]) / 2, 0);
-      });
-    }
-    centerCursors(rawLinks, "out");
-    centerCursors(rawLinks, "in");
+    // Incoming edges into a node are a real merge of distinct upstream
+    // sources (e.g. two receivers feeding one pipeline) -- genuinely
+    // additive, so they stack and center as a group within the node's
+    // height. Outgoing edges are different: every OTel pipeline/exporter
+    // attached to a node receives the *same* complete stream, not a
+    // split of it -- a pipeline feeding two exporters sends each of them
+    // its whole output, not half each. Stacking those as if additive
+    // reserved space for both when only one node's worth of flow was
+    // budgeted, undersizing the node and forcing its ribbons to crowd
+    // into too little room. So outgoing edges all attach at the same
+    // point -- the node's own vertical center -- instead of competing
+    // for stacked sub-bands.
+    var totalIn = {};
+    rawLinks.forEach(function (l) { totalIn[l.t.id] = (totalIn[l.t.id] || 0) + l.w; });
+    Object.keys(totalIn).forEach(function (id) {
+      var box = byId[id];
+      box.inCursor = Math.max((box.height - totalIn[id]) / 2, 0);
+    });
 
     var links = rawLinks.map(function (l) {
       var s = l.s, t = l.t, w = l.w;
-      var sy = s.y + s.outCursor + w / 2;
-      s.outCursor += w;
+      var sy = s.y + s.height / 2;
       var ty = t.y + t.inCursor + w / 2;
       t.inCursor += w;
       return { sx: s.x + NODE_W, sy: sy, tx: t.x, ty: ty, w: w, color: l.color, from: l.from, to: l.to, flow: l.flow };

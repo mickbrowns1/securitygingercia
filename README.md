@@ -838,11 +838,14 @@ no separate process, no build step, no Node. Three views:
   syslog/udp and syslog/tcp both into logs/syslog) don't render as one
   indistinguishable ribbon.
   Box height grows on its own when a column only has a few nodes to
-  show (shrinking back down once a column gets crowded), and every
-  ribbon lands on the vertical middle of the node it touches rather
-  than stacking from the top edge, so a lightly-used node's ribbon
-  doesn't look like it's clinging to one corner of an otherwise-empty
-  box.
+  show (shrinking back down once a column gets crowded). Incoming
+  ribbons (e.g. two receivers feeding one pipeline -- a real merge of
+  distinct data) stack and center as a group within the node they land
+  on, rather than clinging to its top edge. Outgoing ribbons don't
+  stack at all -- every exporter attached to a pipeline gets that
+  pipeline's *entire* output, not a share of it, so all of a node's
+  outbound ribbons fan out from the same point at its vertical center
+  instead of competing for space as if they were additive.
 
 Keyboard shortcuts (press `?` anywhere in the UI for a reminder): `h`/
 `l`/`t` jump to Health/Logs/Topology, `/` focuses the Logs search box,
