@@ -9,3 +9,7 @@
 # (main.go, go.mod, go.sum, the compiled binary itself).
 /otelcol/dist/
 /otelcol/.smoke-test/
+
+# sgcia-fleet-server's compiled binary and its runtime SQLite inventory.
+/fleet/sgcia-fleet-server/sgcia-fleet-server
+/fleet/sgcia-fleet-server/*.db

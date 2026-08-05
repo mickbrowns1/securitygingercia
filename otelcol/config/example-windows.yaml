@@ -46,6 +46,12 @@ extensions:
     endpoint: 127.0.0.1:7801
     config_path: ./config/example-windows.yaml
     metrics_url: http://127.0.0.1:8888/metrics
+    # Optional fleet management enrollment -- uncomment to report this
+    # agent's health/inventory to a central sgcia-fleet-server over OpAMP
+    # (outbound-only, no inbound port opens on this host). Off by default;
+    # see README.md's "Fleet management" section before enabling.
+    # fleet_server_url: ws://fleet.example.com:4320/v1/opamp
+    # fleet_token: ${FLEET_TOKEN}
 
 receivers:
   syslog/udp:

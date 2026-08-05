@@ -30,5 +30,5 @@ func createDefaultConfig() component.Config {
 }
 
 func createExtension(_ context.Context, set extension.Settings, cfg component.Config) (extension.Extension, error) {
-	return newStatusCfgExtension(cfg.(*Config), set.TelemetrySettings.Logger), nil
+	return newStatusCfgExtension(cfg.(*Config), set.TelemetrySettings.Logger, set.BuildInfo.Version), nil
 }
