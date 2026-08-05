@@ -14,10 +14,16 @@ FROM fedora:latest AS builder
 # TLS-interception proxies break rustup's curl|sh bootstrap (cert
 # verification fails against a fresh container with no corporate root CA
 # installed), and Fedora ships a recent-enough rust/cargo directly.
-RUN dnf install -y golang git gcc make rust cargo && dnf clean all
+RUN dnf install -y golang git gcc make rust cargo nodejs npm && dnf clean all
 
 WORKDIR /src
 COPY . .
+
+# The web UI (React, webui-react/) has to be built to dist/ *before* the
+# ocb step below -- otelcol/extensions/statuscfgextension/webui.go embeds
+# that dist/ output via go:embed, so it must exist on disk when `go build`
+# (inside ocb) runs, same ordering install.sh enforces.
+RUN cd otelcol/extensions/statuscfgextension/webui-react && npm ci && npm run build
 
 # otelcol/dist/ (main.go, go.mod, go.sum, components.go, and the compiled
 # binary itself) is gitignored -- OCB (the OpenTelemetry Collector Builder)
