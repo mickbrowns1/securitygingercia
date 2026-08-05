@@ -254,21 +254,25 @@ your own sender actually speaks.
 #### Source templates
 
 `sgcia edit`'s Receivers tab has a `T` key (alongside `a` for a bare
-component) that browses a curated library of 13 source templates --
-Cisco ASA, Cisco Catalyst/IOS, Cisco Meraki, Ubiquiti/UniFi, HAProxy,
-CEF, generic RFC 5424 syslog, generic file tailing, JSON logs, W3C/IIS
-extended logs, nginx access logs, a Windows DHCP server audit log, and
-Active Directory (Windows Event Log) -- each producing a ready-to-use
-receiver, including its `operators:` chain, from a couple of typed
-parameters (a listen address, a file glob, a Windows channel) instead
-of making you hand-write a `regex_parser` from scratch. Pick one, name
-the new receiver, fill in its params, review the generated YAML, then
-confirm to insert it -- same `sgcia-otelcol validate` on save as
-anything else in this editor, so a template can't silently produce an
-invalid config. Some (Cisco ASA, CEF, the W3C/nginx/DHCP formats) match
-a fixed, documented message grammar exactly; others (Cisco Meraki,
-HAProxy) cover the common default but may need adjusting for your
-specific export settings -- each template's own description in the
+component) that browses a curated library of 18 source templates,
+grouped by category -- network/security devices (Cisco ASA, Cisco
+Catalyst/IOS, Cisco Meraki, Ubiquiti/UniFi, HAProxy, CEF), generic
+(RFC 5424 syslog, plain file tailing, JSON logs, W3C/IIS extended logs,
+nginx access logs), Windows (a DHCP server audit log, and Active
+Directory via the Event Log), databases (MySQL, PostgreSQL, SQL
+Server), and messaging/big data (Kafka, Hadoop) -- each producing a
+ready-to-use receiver, including its `operators:` chain, from a couple
+of typed parameters (a listen address, a file glob, a Windows channel)
+instead of making you hand-write a `regex_parser` from scratch. Pick
+one, name the new receiver, fill in its params, review the generated
+YAML, then confirm to insert it -- same `sgcia-otelcol validate` on
+save as anything else in this editor, so a template can't silently
+produce an invalid config. Some (Cisco ASA, CEF, the W3C/nginx/DHCP/
+SQL Server formats) match a fixed, documented message grammar exactly;
+others (Cisco Meraki, HAProxy, MySQL/PostgreSQL/Kafka/Hadoop's log4j-
+style formats) cover the common default but may need adjusting for
+your specific export/configuration settings -- each template's own
+description in the
 picker says which.
 
 `dataset` routes events differently than `splunk_hec` -- it has no

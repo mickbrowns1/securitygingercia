@@ -22,12 +22,16 @@ pub enum TemplateCategory {
     NetworkSecurity,
     Generic,
     Windows,
+    Database,
+    Messaging,
 }
 
 impl TemplateCategory {
     pub fn label(self) -> &'static str {
         match self {
             TemplateCategory::NetworkSecurity => "Network & security devices",
+            TemplateCategory::Database => "Databases",
+            TemplateCategory::Messaging => "Messaging & big data",
             TemplateCategory::Generic => "Generic",
             TemplateCategory::Windows => "Windows / Active Directory",
         }
@@ -457,6 +461,151 @@ fn build_active_directory(params: &Value) -> Value {
     Value::Object(map)
 }
 
+// --- Databases (all `file_log`) ---
+
+const MYSQL_PARAMS: &[FieldSpec] =
+    &[param("include", FieldKind::StringList, true, Some("/var/log/mysql/error.log"), "MySQL error log glob(s) -- e.g. /var/log/mysql/error.log.")];
+
+fn build_mysql(params: &Value) -> Value {
+    let mut map = Map::new();
+    let include = schema_registry::get_path(params, "include").cloned().unwrap_or_else(|| json!(["/var/log/mysql/error.log"]));
+    map.insert("include".to_string(), include);
+    schema_registry::set_path(&mut map, "start_at", json!("end"));
+    map.insert(
+        "operators".to_string(),
+        json!([
+            {
+                // MySQL 8+'s default error log format:
+                // <timestamp> <thread_id> [<level>] [<error_code>] [<subsystem>] message
+                "type": "regex_parser",
+                "parse_from": "body",
+                "parse_to": "attributes",
+                "regex": r"^(?P<timestamp>\S+)\s+(?P<thread_id>\d+)\s+\[(?P<level>\w+)\]\s+\[(?P<error_code>[\w-]+)\]\s+\[(?P<subsystem>[\w.]+)\]\s+(?P<message>.*)$",
+                "on_error": "send_quiet",
+            },
+            add_op("attributes.sourcetype", "mysql_error"),
+        ]),
+    );
+    Value::Object(map)
+}
+
+const POSTGRESQL_PARAMS: &[FieldSpec] = &[param(
+    "include",
+    FieldKind::StringList,
+    true,
+    Some("/var/log/postgresql/postgresql-*.log"),
+    "PostgreSQL log file glob(s) -- e.g. /var/log/postgresql/postgresql-*.log.",
+)];
+
+fn build_postgresql(params: &Value) -> Value {
+    let mut map = Map::new();
+    let include = schema_registry::get_path(params, "include").cloned().unwrap_or_else(|| json!(["/var/log/postgresql/postgresql-*.log"]));
+    map.insert("include".to_string(), include);
+    schema_registry::set_path(&mut map, "start_at", json!("end"));
+    map.insert(
+        "operators".to_string(),
+        json!([
+            {
+                // Matches Postgres's common log_line_prefix default of
+                // "%m [%p] " (millisecond timestamp, then pid), followed
+                // by the level. log_line_prefix is configurable, so this
+                // covers the common default rather than every setup.
+                "type": "regex_parser",
+                "parse_from": "body",
+                "parse_to": "attributes",
+                "regex": r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ \w+) \[(?P<pid>\d+)\] (?P<level>\w+):\s+(?P<message>.*)$",
+                "on_error": "send_quiet",
+            },
+            add_op("attributes.sourcetype", "postgresql"),
+        ]),
+    );
+    Value::Object(map)
+}
+
+const SQL_SERVER_PARAMS: &[FieldSpec] = &[param(
+    "include",
+    FieldKind::StringList,
+    true,
+    Some("/var/opt/mssql/log/errorlog"),
+    "SQL Server error log glob(s) -- e.g. /var/opt/mssql/log/errorlog (Linux/container default) or the ERRORLOG file under Windows's MSSQL log directory.",
+)];
+
+fn build_sql_server(params: &Value) -> Value {
+    let mut map = Map::new();
+    let include = schema_registry::get_path(params, "include").cloned().unwrap_or_else(|| json!(["/var/opt/mssql/log/errorlog"]));
+    map.insert("include".to_string(), include);
+    schema_registry::set_path(&mut map, "start_at", json!("end"));
+    map.insert(
+        "operators".to_string(),
+        json!([
+            {
+                // SQL Server's error log: "<date> <time>.<ms> <spid>  message"
+                "type": "regex_parser",
+                "parse_from": "body",
+                "parse_to": "attributes",
+                "regex": r"^(?P<date>\d{4}-\d{2}-\d{2}) (?P<time>\d{2}:\d{2}:\d{2}\.\d+) (?P<spid>\S+)\s+(?P<message>.*)$",
+                "on_error": "send_quiet",
+            },
+            add_op("attributes.sourcetype", "sql_server"),
+        ]),
+    );
+    Value::Object(map)
+}
+
+// --- Messaging & big data (all `file_log`) ---
+
+const KAFKA_PARAMS: &[FieldSpec] =
+    &[param("include", FieldKind::StringList, true, Some("/var/log/kafka/server.log"), "Kafka broker log glob(s) -- e.g. /var/log/kafka/server.log.")];
+
+fn build_kafka(params: &Value) -> Value {
+    let mut map = Map::new();
+    let include = schema_registry::get_path(params, "include").cloned().unwrap_or_else(|| json!(["/var/log/kafka/server.log"]));
+    map.insert("include".to_string(), include);
+    schema_registry::set_path(&mut map, "start_at", json!("end"));
+    map.insert(
+        "operators".to_string(),
+        json!([
+            {
+                // Kafka's default log4j pattern:
+                // [<timestamp>] <level> message (<logger>)
+                "type": "regex_parser",
+                "parse_from": "body",
+                "parse_to": "attributes",
+                "regex": r"^\[(?P<timestamp>[\d-]+ [\d:,]+)\]\s+(?P<level>\w+)\s+(?P<message>.*?)\s+\((?P<logger>[\w.$]+)\)$",
+                "on_error": "send_quiet",
+            },
+            add_op("attributes.sourcetype", "kafka"),
+        ]),
+    );
+    Value::Object(map)
+}
+
+const HADOOP_PARAMS: &[FieldSpec] =
+    &[param("include", FieldKind::StringList, true, Some("/var/log/hadoop/*.log"), "Hadoop daemon log glob(s) -- e.g. /var/log/hadoop/*.log.")];
+
+fn build_hadoop(params: &Value) -> Value {
+    let mut map = Map::new();
+    let include = schema_registry::get_path(params, "include").cloned().unwrap_or_else(|| json!(["/var/log/hadoop/*.log"]));
+    map.insert("include".to_string(), include);
+    schema_registry::set_path(&mut map, "start_at", json!("end"));
+    map.insert(
+        "operators".to_string(),
+        json!([
+            {
+                // Hadoop's default log4j pattern:
+                // <timestamp> <level> [<thread>] <logger>: message
+                "type": "regex_parser",
+                "parse_from": "body",
+                "parse_to": "attributes",
+                "regex": r"^(?P<timestamp>[\d-]+ [\d:,]+)\s+(?P<level>\w+)\s+\[(?P<thread>[^\]]+)\]\s+(?P<logger>\S+):\s+(?P<message>.*)$",
+                "on_error": "send_quiet",
+            },
+            add_op("attributes.sourcetype", "hadoop"),
+        ]),
+    );
+    Value::Object(map)
+}
+
 pub const SOURCE_TEMPLATES: &[SourceTemplate] = &[
     SourceTemplate {
         key: "cisco_asa",
@@ -587,6 +736,56 @@ pub const SOURCE_TEMPLATES: &[SourceTemplate] = &[
         default_id: "windows_event_log/active_directory",
         params: ACTIVE_DIRECTORY_PARAMS,
         build: build_active_directory,
+    },
+    SourceTemplate {
+        key: "mysql",
+        title: "MySQL error log",
+        category: TemplateCategory::Database,
+        description: "MySQL 8+'s default error log format ([level] [error_code] [subsystem] message).",
+        receiver_type: "file_log",
+        default_id: "file_log/mysql",
+        params: MYSQL_PARAMS,
+        build: build_mysql,
+    },
+    SourceTemplate {
+        key: "postgresql",
+        title: "PostgreSQL log",
+        category: TemplateCategory::Database,
+        description: "Postgres's common log_line_prefix default (%m [%p] ). log_line_prefix is configurable, so this covers the common default.",
+        receiver_type: "file_log",
+        default_id: "file_log/postgresql",
+        params: POSTGRESQL_PARAMS,
+        build: build_postgresql,
+    },
+    SourceTemplate {
+        key: "sql_server",
+        title: "SQL Server error log",
+        category: TemplateCategory::Database,
+        description: "SQL Server's error log format (date time.ms spid message) -- works for both Linux/container and Windows installs.",
+        receiver_type: "file_log",
+        default_id: "file_log/sql_server",
+        params: SQL_SERVER_PARAMS,
+        build: build_sql_server,
+    },
+    SourceTemplate {
+        key: "kafka",
+        title: "Kafka broker log",
+        category: TemplateCategory::Messaging,
+        description: "Kafka's default log4j pattern ([timestamp] level message (logger)).",
+        receiver_type: "file_log",
+        default_id: "file_log/kafka",
+        params: KAFKA_PARAMS,
+        build: build_kafka,
+    },
+    SourceTemplate {
+        key: "hadoop",
+        title: "Hadoop daemon log",
+        category: TemplateCategory::Messaging,
+        description: "Hadoop's default log4j pattern (timestamp level [thread] logger: message).",
+        receiver_type: "file_log",
+        default_id: "file_log/hadoop",
+        params: HADOOP_PARAMS,
+        build: build_hadoop,
     },
 ];
 
