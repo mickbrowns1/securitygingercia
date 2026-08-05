@@ -331,18 +331,28 @@
 
   // ---- Topology view (Sankey diagram) ----
 
-  // A receiver's own events_in exactly sizes its edge into whichever
-  // pipeline it feeds (a receiver belongs to at most one pipeline in
-  // practice), and a pipeline's events_out exactly sizes its edge into
-  // *every* exporter it feeds -- each exporter attached to a pipeline
-  // gets the pipeline's entire output, not a fraction of it. So unlike
-  // a purely decorative diagram, every link width below is a real,
-  // exact number from /status, not an estimate.
+  // Every node and edge in this diagram uses events_in, never
+  // events_out, even for pipelines -- events_out is the *sum* of what a
+  // pipeline sent to every exporter it feeds (real fan-out replication
+  // means each exporter gets the pipeline's entire output, not a
+  // fraction, so with N exporters events_out is roughly Nx the
+  // pipeline's actual single-instance throughput). That's the right
+  // number for the Health tab's bandwidth accounting, but using it here
+  // sized a pipeline's own node off a figure that's already inflated by
+  // however many exporters it happens to feed, and drew each of its
+  // outbound edges at that inflated width too (each edge only ever
+  // carries the pipeline's *unamplified* input, replicated whole to
+  // every exporter -- not a further multiple of it). events_in passes
+  // straight through unchanged from receiver to pipeline, and an
+  // exporter's own events_in is a real Prometheus counter that already
+  // reflects the true cumulative total of everything that arrived from
+  // every pipeline feeding it -- so every node/edge value below is a
+  // real, exact number from /status, not an estimate, and now an
+  // apples-to-apples one across every column too.
   function flowFor(status, type, id) {
     var table = type === "receiver" ? status.receivers : type === "pipeline" ? status.pipelines : status.exporters;
     var rec = (table || {})[id];
-    if (!rec) return 0;
-    return type === "pipeline" ? (rec.events_out || 0) : (rec.events_in || 0);
+    return rec ? (rec.events_in || 0) : 0;
   }
 
   function sumFlow(list) {

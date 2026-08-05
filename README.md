@@ -823,14 +823,22 @@ no separate process, no build step, no Node. Three views:
 - **Topology** -- a receiver → pipeline → exporter Sankey diagram,
   combining the structural graph from `/topology` with live counts from
   `/status`: node height and ribbon width are real numbers, not
-  decoration -- a receiver's `events_in` sizes its edge into its
-  pipeline, and a pipeline's `events_out` sizes its edge into *every*
-  exporter it feeds (each attached exporter gets that pipeline's entire
-  output, not a fraction of it, so this is exact, not estimated). Makes
-  it easy to see at a glance which destinations each input actually
-  feeds and how much of the total volume flows where, especially once a
-  config has several pipelines fanning out to shared exporters. Each
-  pipeline gets its own base color, carried unshaded onto its node
+  decoration. Every node and edge here is sized off `events_in`, even
+  for pipelines -- a pipeline's `events_out` is the *sum* of what it
+  sent to every exporter it feeds (real fan-out replication means each
+  exporter gets the pipeline's entire output, not a fraction, so with
+  two exporters `events_out` is roughly double the pipeline's actual
+  throughput). That's the right number for the Pipelines table's
+  bandwidth accounting above, but sizing *this* diagram off it would
+  make a pipeline's own node -- and each of its outbound edges --
+  balloon by however many exporters it happens to feed. `events_in`
+  passes straight through from receiver to pipeline unchanged, and an
+  exporter's own `events_in` is a real counter that already reflects
+  everything that arrived from every pipeline feeding it -- so every
+  node and ribbon is an apples-to-apples, real number from `/status`,
+  not an estimate, and a receiver, its pipeline, and that pipeline's
+  exporters all read the same size when nothing else is sharing them.
+  Each pipeline gets its own base color, carried unshaded onto its node
   border and every outbound (exporter-side) ribbon, so a pipeline stays
   traceable through crossings instead of blurring into a single wash of
   blue. Inbound (receiver-side) ribbons get a shade variant of that same
@@ -847,14 +855,11 @@ no separate process, no build step, no Node. Three views:
   outbound ribbons fan out from the same point at its vertical center
   instead of competing for space as if they were additive.
   Every node and ribbon also shows a percentage alongside its raw
-  count -- of total ingested logs (every receiver's `events_in`
-  summed), the one number in the diagram that's never inflated by a
-  pipeline replicating its output to more than one exporter. That
-  makes a node's relative size legible as a number, not just a ribbon
-  width to eyeball against its neighbors -- and it's normal for a
-  pipeline or exporter to show *over* 100% (a pipeline feeding two
-  exporters sends each of them its whole output, not half), which is
-  real fan-out amplification, not a bug.
+  count, of total ingested logs (every receiver's `events_in` summed) --
+  a receiver's share passes straight through to its pipeline unchanged,
+  and an exporter's percentage is the true cumulative sum of every
+  pipeline feeding it, so percentages stay legible and (bar rounding)
+  never exceed 100% anywhere in the diagram.
 
 Keyboard shortcuts (press `?` anywhere in the UI for a reminder): `h`/
 `l`/`t` jump to Health/Logs/Topology, `/` focuses the Logs search box,
