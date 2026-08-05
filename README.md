@@ -74,9 +74,10 @@ instead of step 6's systemd unit.
 
 ## Installing
 
-One command handles it: installs git/Go/a C toolchain/Rust if they're
-missing, builds both binaries, installs them to `/usr/local/bin`, and
-creates `/etc/sgcia` + `/var/lib/sgcia` with a starter config copied in.
+One command handles it: installs git/Go/Node/a C toolchain/Rust if
+they're missing, builds the embedded web UI and both binaries, installs
+them to `/usr/local/bin`, and creates `/etc/sgcia` + `/var/lib/sgcia`
+with a starter config copied in.
 Works on Linux (Debian/Ubuntu, Fedora/RHEL/CentOS, Arch) and macOS:
 
 ```bash
@@ -836,9 +837,13 @@ Point a browser at `http://<statuscfg.endpoint>/` (e.g.
 `http://127.0.0.1:7801/` if you haven't changed the default, or from a
 remote machine via an SSH tunnel: `ssh -L 7801:127.0.0.1:7801
 user@host`, since the endpoint itself stays loopback-only) for a small
-embedded dashboard -- plain HTML/CSS/vanilla JS served straight out of
-the `sgcia-otelcol` binary (`otelcol/extensions/statuscfgextension/webui/`),
-no separate process, no build step, no Node. Three views:
+embedded dashboard -- a React single-page app
+(`otelcol/extensions/statuscfgextension/webui-react/`) built once at
+install/build time and served straight out of the `sgcia-otelcol`
+binary from then on -- no separate process to run alongside it.
+`install.sh` bootstraps Node and builds it for you, the same way it
+already bootstraps Go/Rust; see [Installing](#installing). Three
+views:
 
 - **Health** -- uptime plus per-receiver/pipeline/exporter counters,
   polling `/status` every few seconds. The same data `sgcia dashboard`

@@ -8,10 +8,11 @@ import (
 
 // webUIFS holds the React single-page app served at "/" -- a health
 // dashboard, log viewer, and topology diagram, all backed by the JSON
-// endpoints already registered alongside it. EXPERIMENTAL (branch
-// reactdontdoit): requires `npm run build` in webui-react/ before this
-// package builds, since it embeds that build's dist/ output rather than
-// flat source files -- see webui-react/README.md.
+// endpoints already registered alongside it. Requires `npm run build`
+// in webui-react/ before this package builds, since it embeds that
+// build's dist/ output rather than flat source files -- `install.sh`
+// does this for you (bootstrapping Node the same way it already does
+// Go/Rust); see webui-react/README.md for the manual equivalent.
 //
 //go:embed webui-react/dist
 var webUIFS embed.FS
