@@ -32,6 +32,13 @@ type Config struct {
 	// FleetToken is sent as a bearer token when connecting to
 	// FleetServerURL. Only meaningful if FleetServerURL is set.
 	FleetToken string `mapstructure:"fleet_token"`
+
+	// FleetInstanceIDPath is where this agent persists its OpAMP instance
+	// ID across restarts, so the fleet server recognizes a restarted
+	// agent as the same one instead of a fresh enrollment. Only
+	// meaningful if FleetServerURL is set. Empty disables persistence (a
+	// new random ID is generated every process start).
+	FleetInstanceIDPath string `mapstructure:"fleet_instance_id_path"`
 }
 
 func (c *Config) Validate() error {

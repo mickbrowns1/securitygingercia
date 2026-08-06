@@ -3,10 +3,14 @@ package statuscfgextension // import "github.com/mickbrowns1/securitygingercia/o
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/open-telemetry/opamp-go/client"
@@ -60,7 +64,7 @@ func startOpampReporter(cfg *Config, logger *zap.Logger, endpoint, buildVersion 
 	}
 
 	hostname, _ := os.Hostname()
-	instanceUID := randomInstanceUID()
+	instanceUID := loadOrCreateInstanceUID(cfg.FleetInstanceIDPath, logger)
 
 	c := client.NewWebSocket(zapOpampLogger{logger: logger})
 
@@ -181,11 +185,49 @@ func stringAttr(key, value string) *protobufs.KeyValue {
 	}
 }
 
-// randomInstanceUID generates a 16-byte instance identifier. The OpAMP
-// spec recommends UUID v7 (so IDs sort roughly by creation time); a
-// process-lifetime random ID is a simpler stand-in for Phase 1, at the
-// cost of the fleet server seeing a "new" agent after every restart
-// instead of recognizing the same one reconnecting.
+// loadOrCreateInstanceUID returns a stable OpAMP instance ID for this
+// agent, persisted at path (hex-encoded) so a restart reconnects as the
+// same agent instead of enrolling as a new one every time. An empty path,
+// or any failure to read/write it, falls back to a fresh random ID for
+// this run only -- persistence is a nice-to-have, not something worth
+// failing extension startup over.
+func loadOrCreateInstanceUID(path string, logger *zap.Logger) types.InstanceUid {
+	if path == "" {
+		return randomInstanceUID()
+	}
+
+	if data, err := os.ReadFile(path); err == nil {
+		if id, err := decodeInstanceUID(strings.TrimSpace(string(data))); err == nil {
+			return id
+		}
+		logger.Warn("fleet instance ID file has unexpected contents, generating a new one", zap.String("path", path))
+	}
+
+	id := randomInstanceUID()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		logger.Warn("could not create directory to persist fleet instance ID -- this agent will look like a new enrollment on every restart", zap.String("path", path), zap.Error(err))
+		return id
+	}
+	if err := os.WriteFile(path, []byte(hex.EncodeToString(id[:])), 0o600); err != nil {
+		logger.Warn("could not persist fleet instance ID -- this agent will look like a new enrollment on every restart", zap.String("path", path), zap.Error(err))
+	}
+	return id
+}
+
+func decodeInstanceUID(s string) (types.InstanceUid, error) {
+	var id types.InstanceUid
+	b, err := hex.DecodeString(s)
+	if err != nil || len(b) != len(id) {
+		return id, errors.New("invalid instance UID encoding")
+	}
+	copy(id[:], b)
+	return id, nil
+}
+
+// randomInstanceUID generates a fresh 16-byte instance identifier. The
+// OpAMP spec recommends UUID v7 (so IDs sort roughly by creation time);
+// plain random bytes are good enough here since nothing in this project
+// relies on that ordering property.
 func randomInstanceUID() types.InstanceUid {
 	var id types.InstanceUid
 	_, _ = rand.Read(id[:])

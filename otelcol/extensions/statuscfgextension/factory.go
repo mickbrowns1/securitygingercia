@@ -26,6 +26,11 @@ func createDefaultConfig() component.Config {
 		// code changes on their end, just running against this binary.
 		Endpoint:   "127.0.0.1:7801",
 		MetricsURL: "http://localhost:8888/metrics",
+		// Matches the writable runtime-state directory install.sh's
+		// systemd setup already chowns to the sgcia service user (same
+		// one file_storage's own `directory` lives under by convention)
+		// -- /etc/sgcia is not writable by that user, only readable.
+		FleetInstanceIDPath: "/var/lib/sgcia/sgcia-fleet-instance-uid",
 	}
 }
 
