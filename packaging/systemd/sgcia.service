@@ -13,16 +13,24 @@ EnvironmentFile=-/etc/sgcia/sgcia.env
 # README.md). Its statuscfg extension (configured inside config.yaml, not
 # via a CLI flag) is what `sgcia dashboard`/`sgcia edit` poll -- there's no
 # separate --status-addr flag on this binary.
-ExecStart=/usr/local/bin/sgcia-otelcol --config file:/etc/sgcia/config.yaml
+#
+# ExecStart points at the *real* binary under /var/lib/sgcia, not the
+# /usr/local/bin/sgcia-otelcol symlink install.sh also creates (that
+# symlink is just a CLI/PATH convenience, e.g. for `sgcia-otelcol
+# validate` run by hand). Fleet management's binary rollout (Phase 4)
+# downloads a new build, verifies it, and atomically renames it into place
+# at this exact path -- entirely within ReadWritePaths below, so the
+# sandbox never needs widening to cover /usr/local/bin.
+ExecStart=/var/lib/sgcia/bin/sgcia-otelcol --config file:/etc/sgcia/config.yaml
 # Restart=always, not just on-failure: fleet management's remote-config-push
-# (Phase 2) applies a newly-validated config by sending itself SIGTERM for a
-# real graceful shutdown (pipelines flush, exporters drain) rather than a
-# raw os.Exit -- but a clean shutdown exits 0, which on-failure would not
-# restart. The only clean-exit-0 paths today are systemd-requested
-# stop/restart (which systemd's own stop-tracking already exempts from
-# restart-looping, independent of this setting) and this new self-triggered
-# one -- there's no other silent-exit-0 path here that `always` newly loops
-# on.
+# (Phase 2) and binary rollout (Phase 4) both apply a newly-validated
+# update by sending the process itself SIGTERM for a real graceful
+# shutdown (pipelines flush, exporters drain) rather than a raw os.Exit --
+# but a clean shutdown exits 0, which on-failure would not restart. The
+# only clean-exit-0 paths today are systemd-requested stop/restart (which
+# systemd's own stop-tracking already exempts from restart-looping,
+# independent of this setting) and these self-triggered ones -- there's no
+# other silent-exit-0 path here that `always` newly loops on.
 Restart=always
 RestartSec=5s
 WorkingDirectory=/var/lib/sgcia

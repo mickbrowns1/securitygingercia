@@ -604,14 +604,23 @@ sudo "$EDITOR" /etc/sgcia/sgcia.env   # fill in real HEC token(s)
 sudo chown sgcia:sgcia /etc/sgcia/sgcia.env
 sudo chmod 600 /etc/sgcia/sgcia.env   # secrets file, keep it non-world-readable
 sudo "$EDITOR" /etc/sgcia/config.yaml  # your actual config (start from otelcol/config/example.yaml)
-sudo chgrp sgcia /etc/sgcia/config.yaml  # group (not owner!) read access for the service -- keeps it
-sudo chmod 640 /etc/sgcia/config.yaml    # editable as yourself (no sudo) via `sgcia edit` afterward too
+sudo chgrp sgcia /etc/sgcia/config.yaml  # group (not owner!) read access for the service
+sudo chmod 640 /etc/sgcia/config.yaml    # editable as yourself (no sudo) -- until the first fleet config push, see below
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now sgcia
 systemctl status sgcia
 journalctl -u sgcia -f
 ```
+
+**`config.yaml`'s ownership changes the first time fleet management pushes a
+config to this agent.** Applying a pushed config (see
+[Fleet management](#fleet-management-optional)) writes the new file and
+renames it into place as the `sgcia` service user -- the rename replaces
+the file's owner along with its content, so `config.yaml` goes from
+`$USER:sgcia` to `sgcia:sgcia`. After that, reading or editing it directly
+needs `sudo` (or `sudo sgcia edit --config /etc/sgcia/config.yaml`) --
+that's expected, not something to fix.
 
 The unit grants `CAP_NET_BIND_SERVICE` so the non-root `sgcia` user can
 bind privileged ports (514/601) -- remove that line if every

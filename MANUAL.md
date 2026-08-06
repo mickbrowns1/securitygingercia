@@ -179,8 +179,29 @@ doesn't yet know it's a command you can type by name -- it only knows how
 to find it if you tell it the exact location. Installing just means:
 copy each file into a folder your computer already checks automatically.
 
+First, create the two folders these binaries expect to use, for the
+config file and working data (checkpoints/bookmarks via the
+`file_storage` extension):
+
 ```bash
-sudo install -m 755 otelcol/dist/sgcia-otelcol /usr/local/bin/sgcia-otelcol
+sudo mkdir -p /etc/sgcia /var/lib/sgcia
+sudo chown "$USER" /etc/sgcia /var/lib/sgcia
+```
+
+Now install both binaries. `sgcia-otelcol` goes under `/var/lib/sgcia`,
+not `/usr/local/bin`, with a symlink there instead -- this is what lets
+fleet management's binary rollout (see README.md's "Fleet management"
+section) swap it in place later using only the write access systemd's
+sandbox already grants (`ReadWritePaths=/var/lib/sgcia /etc/sgcia` in
+[`packaging/systemd/sgcia.service`](packaging/systemd/sgcia.service)),
+with no sandbox widening required. The symlink itself never needs to
+change after this point -- it's just there so you can still type
+`sgcia-otelcol` by name (e.g. to run `sgcia-otelcol validate` by hand):
+
+```bash
+sudo mkdir -p /var/lib/sgcia/bin
+sudo install -m 755 otelcol/dist/sgcia-otelcol /var/lib/sgcia/bin/sgcia-otelcol
+sudo ln -sf /var/lib/sgcia/bin/sgcia-otelcol /usr/local/bin/sgcia-otelcol
 sudo install -m 755 target/release/sgcia /usr/local/bin/sgcia
 ```
 
@@ -198,15 +219,6 @@ If either says `command not found`, either the file wasn't actually
 built (re-check step 2 or 3's output for errors), or your terminal cached
 its list of known commands before the install -- open a **brand new
 terminal window** (or run `hash -r`) and try again.
-
-Finally, create the two folders these binaries expect to use, for the
-config file and working data (checkpoints/bookmarks via the
-`file_storage` extension):
-
-```bash
-sudo mkdir -p /etc/sgcia /var/lib/sgcia
-sudo chown "$USER" /etc/sgcia /var/lib/sgcia
-```
 
 The `chown` makes both folders writable by you directly, so you can run
 `sgcia edit`/`sgcia-otelcol` as yourself without `sudo` while testing --

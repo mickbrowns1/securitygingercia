@@ -204,13 +204,22 @@ info "built: $REPO_ROOT/target/release/sgcia"
 
 # --- 4. Install both binaries + create working directories ---
 
-step "Installing both binaries to /usr/local/bin (will ask for your login password)"
-sudo install -m 755 "$REPO_ROOT/otelcol/dist/sgcia-otelcol" /usr/local/bin/sgcia-otelcol
-sudo install -m 755 "$REPO_ROOT/target/release/sgcia" /usr/local/bin/sgcia
-
 step "Creating /etc/sgcia and /var/lib/sgcia"
 sudo mkdir -p /etc/sgcia /var/lib/sgcia
 sudo chown "$USER" /etc/sgcia /var/lib/sgcia
+
+step "Installing sgcia-otelcol to /var/lib/sgcia/bin (will ask for your login password)"
+# The real binary lives under /var/lib/sgcia, not /usr/local/bin -- this is
+# what lets fleet management's binary rollout (Phase 4) swap it in place
+# with only the write access systemd's sandbox already grants
+# (ReadWritePaths=/var/lib/sgcia /etc/sgcia in packaging/systemd/sgcia.service),
+# no sandbox widening required. /usr/local/bin/sgcia-otelcol below is just a
+# symlink to it, for convenience running `sgcia-otelcol validate` etc. by
+# hand -- the symlink itself never needs to change after this point.
+sudo mkdir -p /var/lib/sgcia/bin
+sudo install -m 755 "$REPO_ROOT/otelcol/dist/sgcia-otelcol" /var/lib/sgcia/bin/sgcia-otelcol
+sudo ln -sf /var/lib/sgcia/bin/sgcia-otelcol /usr/local/bin/sgcia-otelcol
+sudo install -m 755 "$REPO_ROOT/target/release/sgcia" /usr/local/bin/sgcia
 
 if [ ! -f /etc/sgcia/config.yaml ]; then
   step "Copying the example config to /etc/sgcia/config.yaml as a starting point"
@@ -239,8 +248,14 @@ if have systemctl && [ -d /run/systemd/system ]; then
   step "Setting up the sgcia systemd service"
   id sgcia >/dev/null 2>&1 || sudo useradd --system --home /var/lib/sgcia --shell /usr/sbin/nologin sgcia
   sudo chown -R sgcia:sgcia /var/lib/sgcia
-  # Group (not owner!) access for the service -- keeps config.yaml
-  # editable as yourself, without sudo, via `sgcia edit` afterward too.
+  # Group (not owner!) access for the service -- lets you read/edit
+  # config.yaml as yourself without sudo initially. That stops being true
+  # the first time a config is applied via fleet management's remote
+  # config push (see README.md's "Fleet management" section): the sgcia
+  # service writes+renames the new file as itself, which flips the file's
+  # owner to sgcia. From that point on, use sudo (or `sudo sgcia edit ...`)
+  # to read or edit it directly -- this is expected, not a bug to work
+  # around.
   sudo chgrp sgcia /etc/sgcia/config.yaml
   sudo chmod 640 /etc/sgcia/config.yaml
   # Directory itself also needs group write+execute (not just the file):
