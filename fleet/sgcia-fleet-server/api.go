@@ -18,9 +18,9 @@ import (
 // read-only GET /agents (list, optionally filtered by ?tag=) and GET
 // /agents/{id} (detail); Phase 2's POST /agents/{id}/config (push a new
 // config) and POST /agents/{id}/rollback (re-push the last-known-good
-// one); and Phase 3's PUT /agents/{id}/tags and POST
+// one); Phase 3's PUT /agents/{id}/tags and POST
 // /agents/bulk/config?tag=... (push to every agent currently carrying a
-// tag).
+// tag); and DELETE /agents/{id} to clear a stale/duplicate inventory row.
 func newAPIHandlers(mux *http.ServeMux, st *store, registry *connRegistry, logger *zap.Logger) {
 	mux.HandleFunc("/agents", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -67,6 +67,8 @@ func newAPIHandlers(mux *http.ServeMux, st *store, registry *connRegistry, logge
 			handleRollback(w, r, st, registry, logger, id)
 		case action == "tags" && r.Method == http.MethodPut:
 			handleSetTags(w, r, st, logger, id)
+		case action == "" && r.Method == http.MethodDelete:
+			handleDeleteAgent(w, r, st, logger, id)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -317,6 +319,24 @@ func handleSetTags(w http.ResponseWriter, r *http.Request, st *store, logger *za
 	}
 
 	writeJSON(w, logger, map[string]any{"id": id, "tags": normalized})
+}
+
+// handleDeleteAgent removes an agent's inventory row -- for clearing
+// stale/duplicate entries. If the agent is actually still running and
+// connected, it simply reappears on its next OpAMP message; this only
+// ever touches the inventory row, never the live connection.
+func handleDeleteAgent(w http.ResponseWriter, r *http.Request, st *store, logger *zap.Logger, id string) {
+	deleted, err := st.deleteAgent(r.Context(), id)
+	if err != nil {
+		logger.Error("deleting agent", zap.String("agent", id), zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !deleted {
+		http.NotFound(w, r)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func writeJSON(w http.ResponseWriter, logger *zap.Logger, v any) {

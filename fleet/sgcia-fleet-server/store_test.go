@@ -148,6 +148,43 @@ func TestSetTags_FullReplaceSemantics(t *testing.T) {
 	}
 }
 
+func TestDeleteAgent(t *testing.T) {
+	st, err := openStore(filepath.Join(t.TempDir(), "delete.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.close()
+	ctx := context.Background()
+
+	if err := st.touchLastSeen(ctx, "stale-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, err := st.deleteAgent(ctx, "stale-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !deleted {
+		t.Fatal("expected deleteAgent to report a row was deleted")
+	}
+
+	agent, err := st.getAgent(ctx, "stale-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent != nil {
+		t.Fatalf("expected the agent to be gone after deletion, got %+v", agent)
+	}
+
+	deleted, err = st.deleteAgent(ctx, "never-existed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted {
+		t.Fatal("expected deleteAgent to report false for an id that never existed")
+	}
+}
+
 func TestParseTags(t *testing.T) {
 	cases := []struct {
 		csv  string

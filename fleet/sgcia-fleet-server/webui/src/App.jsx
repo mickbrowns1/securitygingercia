@@ -154,6 +154,17 @@ export default function App() {
     setAgents((prev) => prev.map((a) => (a.id === id ? { ...a, tags } : a)));
   }
 
+  // Removes a stale/duplicate inventory row (e.g. left over from an agent
+  // restart before its instance ID was persisted). If the agent is still
+  // actually running, it just reappears on its next check-in -- this only
+  // ever touches the fleet server's inventory, never the agent itself.
+  function removeAgent(agent) {
+    if (!confirm(`Remove ${agent.hostname || agent.id} from the fleet inventory? If it's still running, it will reappear on its next check-in.`)) return;
+    sendJSON("DELETE", `agents/${agent.id}`)
+      .then(() => setAgents((prev) => prev.filter((a) => a.id !== agent.id)))
+      .catch((err) => alert(`Could not remove ${agent.hostname || agent.id}: ${err.message}`));
+  }
+
   const healthyCount = agents.filter((a) => a.healthy).length;
   const unhealthyCount = agents.length - healthyCount;
 
@@ -200,6 +211,7 @@ export default function App() {
                   <th>Tags</th>
                   <th>Drill down</th>
                   <th></th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
@@ -229,10 +241,15 @@ export default function App() {
                           {pushTargetId === a.id ? "Cancel" : "Push config"}
                         </button>
                       </td>
+                      <td>
+                        <button type="button" className="danger-btn" onClick={() => removeAgent(a)}>
+                          Remove
+                        </button>
+                      </td>
                     </tr>
                     {pushTargetId === a.id && (
                       <tr>
-                        <td colSpan={7}>
+                        <td colSpan={8}>
                           <PushConfigPanel
                             placeholder={`Full config.yaml to push to ${a.hostname || a.id}...`}
                             onPush={(text) => sendJSON("POST", `agents/${a.id}/config`, { config_yaml: text })}

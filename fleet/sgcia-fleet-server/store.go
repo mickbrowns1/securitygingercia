@@ -110,6 +110,26 @@ func (s *store) close() error {
 	return s.db.Close()
 }
 
+// deleteAgent removes an agent's inventory row outright -- for clearing
+// stale entries (e.g. duplicate enrollments from an agent restart before
+// its instance ID was persisted, or a permanently decommissioned host).
+// Returns false if no row matched. Deleting a still-connected agent isn't
+// specially handled: if it's still actually running, it simply reappears
+// on its next OpAMP message (upsertAgentDescription/touchLastSeen insert
+// a fresh row) -- there's nothing to reconcile with the live connection
+// registry, which is keyed the same way and unaffected by this.
+func (s *store) deleteAgent(ctx context.Context, id string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM agents WHERE id = ?`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // upsertAgentDescription records identifying attributes for an agent,
 // creating the row if this is the first message seen from it.
 func (s *store) upsertAgentDescription(ctx context.Context, id, hostname, serviceVersion, localUIAddr string) error {
