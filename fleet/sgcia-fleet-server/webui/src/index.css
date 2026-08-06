@@ -75,6 +75,9 @@ main { padding: 20px; max-width: 1100px; margin: 0 auto; }
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .summary-item .value {
@@ -154,6 +157,44 @@ main { padding: 20px; max-width: 1100px; margin: 0 auto; }
   cursor: help;
 }
 
+/* Same shape as .err-indicator (Phase 5's flapping/config-drift badges) --
+   --warn instead of --err, since these are worth an operator's attention
+   without being as severe as outright unhealthy. */
+.warn-indicator {
+  display: inline-block;
+  background: var(--warn);
+  color: var(--bg);
+  width: 14px;
+  height: 14px;
+  line-height: 14px;
+  text-align: center;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 700;
+  margin-left: 6px;
+  cursor: help;
+}
+
+/* Small neutral "i" badge for a SummaryItem's optional description --
+   same shape as err-indicator/warn-indicator, --accent instead since this
+   is purely informational, not a warning. */
+.info-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--muted);
+  color: var(--muted);
+  width: 13px;
+  height: 13px;
+  line-height: 1;
+  border-radius: 50%;
+  font-size: 9px;
+  font-style: italic;
+  font-weight: 700;
+  cursor: help;
+}
+
 .drilldown-hint {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
@@ -176,8 +217,68 @@ main { padding: 20px; max-width: 1100px; margin: 0 auto; }
 
 .conn-status.down { color: var(--err); }
 
-.danger-btn {
-  border-color: var(--err);
+/* Consolidates what used to be five separate per-agent action buttons
+   into one dropdown -- see App.jsx's ActionsMenu. */
+.actions-menu {
+  position: relative;
+  display: inline-block;
+}
+
+/* The dropdown trigger itself -- pill-shaped and themed, unlike the
+   plain browser-default buttons the rest of this UI still uses, since
+   this is the one button every Agents row repeats and is worth making
+   feel native to the dark theme rather than a stock light-gray box. */
+.actions-menu > button {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  padding: 6px 16px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.actions-menu > button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.actions-menu-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  padding: 4px;
+}
+
+.actions-menu-item {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.actions-menu-item:hover:not(:disabled) {
+  background: var(--bg);
+}
+
+.actions-menu-item:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.actions-menu-item.danger {
   color: var(--err);
 }
 
@@ -205,6 +306,14 @@ main { padding: 20px; max-width: 1100px; margin: 0 auto; }
   padding: 1px 8px;
   font-size: 11px;
   color: var(--muted);
+}
+
+/* Lit up when a pill's tag exactly matches the current "Filter by tag"
+   input -- immediate feedback on what you're about to filter to. */
+.tag-pill-match {
+  border-color: var(--ok);
+  color: var(--ok);
+  background: rgba(76, 175, 125, 0.15);
 }
 
 .tag-empty {

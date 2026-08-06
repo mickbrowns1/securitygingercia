@@ -20,11 +20,16 @@ import (
 
 func main() {
 	var (
-		listen  = flag.String("listen", "0.0.0.0:4320", "address the fleet server listens on (REST API, OpAMP, web UI all share this one endpoint)")
-		dbPath  = flag.String("db", "sgcia-fleet.db", "path to the SQLite inventory database")
-		tokenFl = flag.String("token", os.Getenv("SGCIA_FLEET_TOKEN"), "shared bearer token agents must present to enroll -- empty disables auth (dev only)")
+		listen      = flag.String("listen", "0.0.0.0:4320", "address the fleet server listens on (REST API, OpAMP, web UI all share this one endpoint)")
+		dbPath      = flag.String("db", "sgcia-fleet.db", "path to the SQLite inventory database")
+		tokenFl     = flag.String("token", os.Getenv("SGCIA_FLEET_TOKEN"), "shared bearer token agents must present to enroll -- empty disables auth (dev only)")
+		packagesDir = flag.String("packages-dir", "./packages", "directory where uploaded agent binary packages are stored on disk (metadata lives in the SQLite db; the bytes live here)")
 	)
 	flag.Parse()
+
+	if err := os.MkdirAll(*packagesDir, 0o755); err != nil {
+		log.Fatalf("creating packages directory %q: %v", *packagesDir, err)
+	}
 
 	logger, err := zap.NewProduction()
 	if err != nil {
@@ -46,7 +51,7 @@ func main() {
 	registry := newConnRegistry()
 
 	mux := http.NewServeMux()
-	newAPIHandlers(mux, st, registry, logger)
+	newAPIHandlers(mux, st, registry, logger, *packagesDir, token)
 	mux.Handle("/", webUIHandler())
 
 	connContext, err := startOpampServer(mux, st, registry, logger, token)

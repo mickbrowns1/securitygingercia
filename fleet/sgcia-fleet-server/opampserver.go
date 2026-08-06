@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -23,10 +25,17 @@ const (
 )
 
 // serverCapabilities is what this server advertises in every ServerToAgent
-// message -- it offers remote config (Phase 2) alongside accepting status
-// reports (Phase 1).
+// message -- it offers remote config (Phase 2) and packages (Phase 4)
+// alongside accepting status reports (Phase 1) and effective-config
+// reports (Phase 5, config-drift detection). AcceptsEffectiveConfig is
+// purely declarative -- confirmed via the SDK source that it gates
+// nothing on either side, unlike AcceptsPackages -- but it's still set
+// here so agents inspecting this server's advertised capabilities see an
+// accurate picture.
 const serverCapabilities = uint64(protobufs.ServerCapabilities_ServerCapabilities_AcceptsStatus) |
-	uint64(protobufs.ServerCapabilities_ServerCapabilities_OffersRemoteConfig)
+	uint64(protobufs.ServerCapabilities_ServerCapabilities_OffersRemoteConfig) |
+	uint64(protobufs.ServerCapabilities_ServerCapabilities_OffersPackages) |
+	uint64(protobufs.ServerCapabilities_ServerCapabilities_AcceptsEffectiveConfig)
 
 // connRegistry tracks the live OpAMP Connection for each currently-connected
 // agent, keyed the same way store.go keys agents (hex InstanceUid). This is
@@ -96,6 +105,57 @@ func pushConfig(ctx context.Context, registry *connRegistry, id string, configYA
 	return conn.Send(ctx, msg)
 }
 
+// pushPackage sends a PackagesAvailable offer to agent id, if it's
+// currently connected -- the Phase 4 analogue of pushConfig. downloadURL
+// points back at this same fleet server's own GET /packages/{name}/download
+// endpoint; the agent fetches the actual bytes with a separate plain HTTP
+// GET to that URL rather than receiving them inline over this message (per
+// the OpAMP spec, DownloadableFile only ever carries a URL + hash). Only
+// one package name is ever offered at a time in this project, so
+// AllPackagesHash (nominally an aggregate over every package the agent
+// should have) is simply set to this one package's own content hash --
+// meaningful here only in that it changes whenever the offered package
+// does, which is the one property this phase's manual (non-SDK-syncer)
+// handling actually depends on.
+//
+// token, if non-empty, is carried as an Authorization header on the
+// DownloadableFile -- confirmed live that this is required, not optional:
+// the download endpoint is bearer-token-gated the same way OpAMP
+// connections are, but the agent's own download request is a plain
+// http.Get with no awareness of the OpAMP connection's own Authorization
+// header, so without this the download comes back 401 and the whole push
+// fails even though everything else about it was correct.
+func pushPackage(ctx context.Context, registry *connRegistry, id, name, version string, hash []byte, downloadURL, token string) error {
+	conn, ok := registry.get(id)
+	if !ok {
+		return errAgentNotConnected
+	}
+	file := &protobufs.DownloadableFile{
+		DownloadUrl: downloadURL,
+		ContentHash: hash,
+	}
+	if token != "" {
+		file.Headers = &protobufs.Headers{
+			Headers: []*protobufs.Header{{Key: "Authorization", Value: "Bearer " + token}},
+		}
+	}
+	msg := &protobufs.ServerToAgent{
+		Capabilities: serverCapabilities,
+		PackagesAvailable: &protobufs.PackagesAvailable{
+			Packages: map[string]*protobufs.PackageAvailable{
+				name: {
+					Type:    protobufs.PackageType_PackageType_TopLevel,
+					Version: version,
+					File:    file,
+					Hash:    hash,
+				},
+			},
+			AllPackagesHash: hash,
+		},
+	}
+	return conn.Send(ctx, msg)
+}
+
 // newOpampCallbacks builds the server callbacks that turn incoming OpAMP
 // AgentToServer messages into inventory-store updates. token, if non-empty,
 // is checked as a shared bearer secret on every incoming connection --
@@ -159,6 +219,35 @@ func handleAgentMessage(ctx context.Context, st *store, logger *zap.Logger, id s
 		if err := st.setSnapshot(ctx, id, string(cm.Data)); err != nil {
 			logger.Error("recording snapshot", zap.String("agent", id), zap.Error(err))
 		}
+
+		// Restart/flap detection (Phase 5): the same snapshot blob already
+		// carries started_at (statuscfgextension's MetricsSnapshot), so
+		// this just needs to pull that one field out -- no new capability
+		// or message type, same pattern as topology riding along in
+		// Phase 3.
+		var sa struct {
+			StartedAt string `json:"started_at"`
+		}
+		if err := json.Unmarshal(cm.Data, &sa); err == nil && sa.StartedAt != "" {
+			if err := st.recordStartedAt(ctx, id, sa.StartedAt); err != nil {
+				logger.Error("recording restart history", zap.String("agent", id), zap.Error(err))
+			}
+		}
+	}
+
+	// Config-drift detection (Phase 5): msg.EffectiveConfig is whatever
+	// config the agent reports actually running, independent of anything
+	// this server itself pushed -- only the hash is kept (mirrors
+	// LastKnownGoodConfig's "store full content privately, expose only
+	// the hash" pattern, except here there's no need to keep the full
+	// content at all since nothing re-sends it).
+	if ec := msg.EffectiveConfig; ec != nil {
+		if file := ec.GetConfigMap().GetConfigMap()[""]; file != nil {
+			hash := sha256.Sum256(file.GetBody())
+			if err := st.setEffectiveConfigHash(ctx, id, hex.EncodeToString(hash[:])); err != nil {
+				logger.Error("recording effective config hash", zap.String("agent", id), zap.Error(err))
+			}
+		}
 	}
 
 	if rcs := msg.RemoteConfigStatus; rcs != nil {
@@ -172,6 +261,27 @@ func handleAgentMessage(ctx context.Context, st *store, logger *zap.Logger, id s
 				logger.Error("recording config push failure", zap.String("agent", id), zap.Error(err))
 			}
 			logger.Warn("agent rejected pushed config", zap.String("agent", id), zap.String("error", rcs.ErrorMessage))
+		}
+	}
+
+	// Only one package can ever be pending per agent in this schema (mirrors
+	// the config-push single-slot design), so every entry in the map is
+	// treated as reporting on that one pending push -- there's no per-name
+	// disambiguation needed at this project's scale (one managed package,
+	// sgcia-otelcol).
+	if ps := msg.PackageStatuses; ps != nil {
+		for _, status := range ps.Packages {
+			switch status.Status {
+			case protobufs.PackageStatusEnum_PackageStatusEnum_Installed:
+				if err := st.promotePackageToLastKnownGood(ctx, id); err != nil {
+					logger.Error("promoting installed package to last-known-good", zap.String("agent", id), zap.Error(err))
+				}
+			case protobufs.PackageStatusEnum_PackageStatusEnum_InstallFailed:
+				if err := st.recordPackageFailure(ctx, id, status.ErrorMessage); err != nil {
+					logger.Error("recording package push failure", zap.String("agent", id), zap.Error(err))
+				}
+				logger.Warn("agent rejected pushed package", zap.String("agent", id), zap.String("error", status.ErrorMessage))
+			}
 		}
 	}
 }

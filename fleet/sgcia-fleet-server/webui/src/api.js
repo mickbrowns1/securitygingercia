@@ -22,3 +22,18 @@ export function sendJSON(method, path, body) {
     return data;
   });
 }
+
+// uploadFile POSTs a file's raw bytes as the request body -- unlike
+// sendJSON, there's no JSON envelope around the content itself (the fleet
+// server's package upload endpoint expects the binary directly), only the
+// response is JSON.
+export function uploadFile(path, file) {
+  return fetch(path, { method: "POST", body: file }).then(async (resp) => {
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok) {
+      const message = data?.error || `${resp.status} ${resp.statusText}`;
+      throw new Error(message);
+    }
+    return data;
+  });
+}
