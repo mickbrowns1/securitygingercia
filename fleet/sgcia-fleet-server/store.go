@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -30,21 +31,28 @@ type Agent struct {
 	LastError    string    `json:"last_error,omitempty"`
 	SnapshotJSON string    `json:"-"`
 	Snapshot     any       `json:"snapshot,omitempty"`
+
+	// Config-push state (Phase 2). PendingConfigHash is non-empty while a
+	// push is outstanding (sent but not yet ACKed/NAKed by the agent).
+	// LastKnownGoodConfig is what a rollback re-sends. LastConfigError is
+	// the agent's own validate-failure message, distinct from LastError
+	// (which is Phase 1's general-health field).
+	PendingConfig       string `json:"-"`
+	PendingConfigHash   string `json:"pending_config_hash,omitempty"`
+	LastKnownGoodConfig string `json:"-"`
+	LastKnownGoodHash   string `json:"last_known_good_hash,omitempty"`
+	LastConfigError     string `json:"last_config_error,omitempty"`
 }
 
 type store struct {
 	db *sql.DB
 }
 
-func openStore(path string) (*store, error) {
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		return nil, fmt.Errorf("opening sqlite db %q: %w", path, err)
-	}
-	// sqlite handles exactly one writer at a time; the inventory's write
-	// volume (one upsert per agent per health-report interval) never gets
-	// close to contending on this, so a single shared *sql.DB is fine.
-	const schema = `
+// baseSchema is the original Phase 1 shape. CREATE TABLE IF NOT EXISTS is a
+// no-op against a database that already has this table -- anything added
+// to the Agent shape after Phase 1 belongs in migrations below instead,
+// not here.
+const baseSchema = `
 CREATE TABLE IF NOT EXISTS agents (
 	id              TEXT PRIMARY KEY,
 	hostname        TEXT NOT NULL DEFAULT '',
@@ -55,9 +63,38 @@ CREATE TABLE IF NOT EXISTS agents (
 	last_error      TEXT NOT NULL DEFAULT '',
 	snapshot_json   TEXT NOT NULL DEFAULT ''
 );`
-	if _, err := db.Exec(schema); err != nil {
+
+// migrations adds columns introduced after Phase 1 (currently: Phase 2's
+// config-push state). Run unconditionally on every startup; sqlite has no
+// "ADD COLUMN IF NOT EXISTS", so idempotency comes from swallowing the
+// "duplicate column name" error a re-run produces against a database that
+// already has it -- this way a fresh database (built entirely from
+// baseSchema, no history) and an upgraded one converge on the same shape.
+var migrations = []string{
+	`ALTER TABLE agents ADD COLUMN pending_config TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE agents ADD COLUMN pending_config_hash TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE agents ADD COLUMN last_known_good_config TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE agents ADD COLUMN last_known_good_hash TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE agents ADD COLUMN last_config_error TEXT NOT NULL DEFAULT ''`,
+}
+
+func openStore(path string) (*store, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, fmt.Errorf("opening sqlite db %q: %w", path, err)
+	}
+	// sqlite handles exactly one writer at a time; the inventory's write
+	// volume (one upsert per agent per health-report interval) never gets
+	// close to contending on this, so a single shared *sql.DB is fine.
+	if _, err := db.Exec(baseSchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("creating schema: %w", err)
+	}
+	for _, m := range migrations {
+		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			db.Close()
+			return nil, fmt.Errorf("running migration %q: %w", m, err)
+		}
 	}
 	return &store{db: db}, nil
 }
@@ -112,10 +149,11 @@ ON CONFLICT(id) DO UPDATE SET
 	return err
 }
 
+const agentColumns = `id, hostname, service_version, local_ui_addr, last_seen, healthy, last_error, snapshot_json,
+	pending_config, pending_config_hash, last_known_good_config, last_known_good_hash, last_config_error`
+
 func (s *store) listAgents(ctx context.Context) ([]Agent, error) {
-	rows, err := s.db.QueryContext(ctx, `
-SELECT id, hostname, service_version, local_ui_addr, last_seen, healthy, last_error, snapshot_json
-FROM agents ORDER BY hostname, id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+agentColumns+` FROM agents ORDER BY hostname, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -124,9 +162,7 @@ FROM agents ORDER BY hostname, id`)
 }
 
 func (s *store) getAgent(ctx context.Context, id string) (*Agent, error) {
-	rows, err := s.db.QueryContext(ctx, `
-SELECT id, hostname, service_version, local_ui_addr, last_seen, healthy, last_error, snapshot_json
-FROM agents WHERE id = ?`, id)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+agentColumns+` FROM agents WHERE id = ?`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +183,8 @@ func scanAgents(rows *sql.Rows) ([]Agent, error) {
 		var a Agent
 		var lastSeen string
 		var healthyInt int
-		if err := rows.Scan(&a.ID, &a.Hostname, &a.ServiceVersion, &a.LocalUIAddr, &lastSeen, &healthyInt, &a.LastError, &a.SnapshotJSON); err != nil {
+		if err := rows.Scan(&a.ID, &a.Hostname, &a.ServiceVersion, &a.LocalUIAddr, &lastSeen, &healthyInt, &a.LastError, &a.SnapshotJSON,
+			&a.PendingConfig, &a.PendingConfigHash, &a.LastKnownGoodConfig, &a.LastKnownGoodHash, &a.LastConfigError); err != nil {
 			return nil, err
 		}
 		a.LastSeen, _ = time.Parse(time.RFC3339, lastSeen)
@@ -161,6 +198,51 @@ func scanAgents(rows *sql.Rows) ([]Agent, error) {
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+// setPendingConfig records a config push as outstanding for id, creating
+// the row if this agent has never been seen before (a push can target an
+// agent the fleet server hasn't heard from directly yet, as long as its ID
+// is known -- in practice today that means "recently seen", since IDs come
+// from prior OpAMP traffic, but the schema doesn't require it).
+func (s *store) setPendingConfig(ctx context.Context, id, configYAML, hash string) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO agents (id, last_seen, pending_config, pending_config_hash) VALUES (?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	pending_config = excluded.pending_config,
+	pending_config_hash = excluded.pending_config_hash
+`, id, time.Now().UTC().Format(time.RFC3339), configYAML, hash)
+	return err
+}
+
+// promoteToLastKnownGood is called when an agent reports APPLIED for the
+// hash currently recorded as pending -- the just-applied config becomes
+// what a future rollback would re-send.
+func (s *store) promoteToLastKnownGood(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE agents SET
+	last_known_good_config = pending_config,
+	last_known_good_hash = pending_config_hash,
+	pending_config = '',
+	pending_config_hash = '',
+	last_config_error = ''
+WHERE id = ?
+`, id)
+	return err
+}
+
+// recordConfigFailure is called when an agent reports FAILED -- the
+// pending push is discarded (never touched the agent's live config) and
+// the failure reason is kept for the operator to see.
+func (s *store) recordConfigFailure(ctx context.Context, id, errMsg string) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE agents SET
+	pending_config = '',
+	pending_config_hash = '',
+	last_config_error = ?
+WHERE id = ?
+`, errMsg, id)
+	return err
 }
 
 func boolToInt(b bool) int {

@@ -43,11 +43,13 @@ func main() {
 	}
 	defer st.close()
 
+	registry := newConnRegistry()
+
 	mux := http.NewServeMux()
-	newAPIHandlers(mux, st, logger)
+	newAPIHandlers(mux, st, registry, logger)
 	mux.Handle("/", webUIHandler())
 
-	connContext, err := startOpampServer(mux, st, logger, token)
+	connContext, err := startOpampServer(mux, st, registry, logger, token)
 	if err != nil {
 		logger.Fatal("starting OpAMP server", zap.Error(err))
 	}

@@ -14,7 +14,16 @@ EnvironmentFile=-/etc/sgcia/sgcia.env
 # via a CLI flag) is what `sgcia dashboard`/`sgcia edit` poll -- there's no
 # separate --status-addr flag on this binary.
 ExecStart=/usr/local/bin/sgcia-otelcol --config file:/etc/sgcia/config.yaml
-Restart=on-failure
+# Restart=always, not just on-failure: fleet management's remote-config-push
+# (Phase 2) applies a newly-validated config by sending itself SIGTERM for a
+# real graceful shutdown (pipelines flush, exporters drain) rather than a
+# raw os.Exit -- but a clean shutdown exits 0, which on-failure would not
+# restart. The only clean-exit-0 paths today are systemd-requested
+# stop/restart (which systemd's own stop-tracking already exempts from
+# restart-looping, independent of this setting) and this new self-triggered
+# one -- there's no other silent-exit-0 path here that `always` newly loops
+# on.
+Restart=always
 RestartSec=5s
 WorkingDirectory=/var/lib/sgcia
 
@@ -26,10 +35,12 @@ NoNewPrivileges=true
 
 # Light sandboxing. Adjust ReadWritePaths if your config's file_storage
 # extension's `directory` (checkpoint/bookmark persistence) points
-# somewhere other than /var/lib/sgcia.
+# somewhere other than /var/lib/sgcia. /etc/sgcia is here too (not just
+# read via config_path) because fleet management's remote-config-push
+# (Phase 2) writes a validated config directly over config.yaml.
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/sgcia
+ReadWritePaths=/var/lib/sgcia /etc/sgcia
 
 [Install]
 WantedBy=multi-user.target

@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/open-telemetry/opamp-go/client"
@@ -89,7 +91,9 @@ func startOpampReporter(cfg *Config, logger *zap.Logger, endpoint, buildVersion 
 		return nil, err
 	}
 	capabilities := protobufs.AgentCapabilities_AgentCapabilities_ReportsStatus |
-		protobufs.AgentCapabilities_AgentCapabilities_ReportsHealth
+		protobufs.AgentCapabilities_AgentCapabilities_ReportsHealth |
+		protobufs.AgentCapabilities_AgentCapabilities_AcceptsRemoteConfig |
+		protobufs.AgentCapabilities_AgentCapabilities_ReportsRemoteConfig
 	if err := c.SetCapabilities(&capabilities); err != nil {
 		return nil, err
 	}
@@ -113,6 +117,18 @@ func startOpampReporter(cfg *Config, logger *zap.Logger, endpoint, buildVersion 
 			},
 			OnError: func(_ context.Context, err *protobufs.ServerErrorResponse) {
 				logger.Warn("fleet server reported an error", zap.String("message", err.GetErrorMessage()))
+			},
+			OnMessage: func(_ context.Context, msg *types.MessageData) {
+				if msg.RemoteConfig == nil {
+					return
+				}
+				// Validation + the subprocess call can take a moment; the
+				// client library's own docs recommend returning from
+				// OnMessage quickly and doing this kind of work async. A
+				// fresh context is used rather than the one OnMessage was
+				// called with, since that one isn't guaranteed to outlive
+				// OnMessage's own return.
+				go handleRemoteConfig(c, cfg.ConfigPath, logger, msg.RemoteConfig)
 			},
 		},
 	})
@@ -162,6 +178,120 @@ func (r *opampReporter) reportOnce(logger *zap.Logger, snapshotFn func() (Metric
 		Data:       data,
 	}); err != nil {
 		logger.Warn("sending snapshot to fleet server", zap.Error(err))
+	}
+}
+
+// validateTimeout bounds the self-validate subprocess -- validate is fast;
+// this only guards against a hang.
+const validateTimeout = 30 * time.Second
+
+// restartDelay gives SetRemoteConfigStatus(APPLIED) a moment to actually
+// flush over the still-open WebSocket before the self-SIGTERM below tears
+// the connection down.
+const restartDelay = 2 * time.Second
+
+// handleRemoteConfig implements Phase 2's core safety property: a pushed
+// config is written to a temp file and validated against this same binary
+// (`sgcia-otelcol validate`) before it ever touches the live config file.
+// Only a config that validates gets written (atomically) and triggers a
+// restart; anything else is reported back as failed and the running
+// service is never touched.
+func handleRemoteConfig(c client.OpAMPClient, configPath string, logger *zap.Logger, remoteCfg *protobufs.AgentRemoteConfig) {
+	hash := remoteCfg.GetConfigHash()
+	file := remoteCfg.GetConfig().GetConfigMap()[""]
+	if file == nil {
+		reportConfigStatus(c, logger, hash, false, "no config file found in the pushed ConfigMap (expected a single entry keyed by an empty string)")
+		return
+	}
+
+	self, err := os.Executable()
+	if err != nil {
+		reportConfigStatus(c, logger, hash, false, "locating own binary to validate against: "+err.Error())
+		return
+	}
+
+	if err := validateAndApply(configPath, self, file.GetBody()); err != nil {
+		logger.Warn("rejecting pushed config", zap.Error(err))
+		reportConfigStatus(c, logger, hash, false, err.Error())
+		return
+	}
+
+	logger.Info("applied pushed config, restarting to pick it up")
+	reportConfigStatus(c, logger, hash, true, "")
+	time.AfterFunc(restartDelay, func() {
+		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	})
+}
+
+// validateAndApply writes body to a temp file next to configPath (same
+// directory, so the final rename is atomic), validates it by shelling out
+// to `self validate --config file:<tmp>` (self is normally this same
+// running binary's own path, via os.Executable() -- a parameter here so
+// tests can point it at a fake script instead), and only on success
+// renames it over the live config. Never partially applies: either the
+// live file ends up byte-identical to a config that just validated, or it
+// isn't touched at all.
+func validateAndApply(configPath, self string, body []byte) error {
+	tmpPath := configPath + ".tmp"
+	if err := writeFileSynced(tmpPath, body); err != nil {
+		return fmt.Errorf("writing candidate config: %w", err)
+	}
+	defer os.Remove(tmpPath) // no-op once renamed away on the success path
+
+	ctx, cancel := context.WithTimeout(context.Background(), validateTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, self, "validate", "--config", "file:"+tmpPath)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return errors.New(validateErrorMessage(self, stdout.String(), stderr.String(), err))
+	}
+
+	if err := os.Rename(tmpPath, configPath); err != nil {
+		return fmt.Errorf("applying validated config: %w", err)
+	}
+	return nil
+}
+
+// validateErrorMessage picks the most useful available explanation for why
+// `validate` failed: its stderr, falling back to stdout, falling back to a
+// generic message naming the exit status -- mirroring the same fallback
+// chain crates/collector/src/editor/model.rs's validate_with_binary uses
+// for the equivalent Rust-side check.
+func validateErrorMessage(self, stdout, stderr string, cmdErr error) string {
+	if msg := strings.TrimSpace(stderr); msg != "" {
+		return msg
+	}
+	if msg := strings.TrimSpace(stdout); msg != "" {
+		return msg
+	}
+	return fmt.Sprintf("%s validate exited with %v", self, cmdErr)
+}
+
+func writeFileSynced(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	return f.Sync()
+}
+
+func reportConfigStatus(c client.OpAMPClient, logger *zap.Logger, hash []byte, applied bool, errMsg string) {
+	status := protobufs.RemoteConfigStatuses_RemoteConfigStatuses_FAILED
+	if applied {
+		status = protobufs.RemoteConfigStatuses_RemoteConfigStatuses_APPLIED
+	}
+	if err := c.SetRemoteConfigStatus(&protobufs.RemoteConfigStatus{
+		LastRemoteConfigHash: hash,
+		Status:               status,
+		ErrorMessage:         errMsg,
+	}); err != nil {
+		logger.Warn("reporting remote config status to fleet server", zap.Error(err))
 	}
 }
 

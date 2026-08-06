@@ -239,10 +239,17 @@ if have systemctl && [ -d /run/systemd/system ]; then
   step "Setting up the sgcia systemd service"
   id sgcia >/dev/null 2>&1 || sudo useradd --system --home /var/lib/sgcia --shell /usr/sbin/nologin sgcia
   sudo chown -R sgcia:sgcia /var/lib/sgcia
-  # Group (not owner!) read access for the service -- keeps config.yaml
+  # Group (not owner!) access for the service -- keeps config.yaml
   # editable as yourself, without sudo, via `sgcia edit` afterward too.
   sudo chgrp sgcia /etc/sgcia/config.yaml
   sudo chmod 640 /etc/sgcia/config.yaml
+  # Directory itself also needs group write+execute (not just the file):
+  # fleet management's remote-config-push (Phase 2) has the service write a
+  # temp file into this directory and rename it over config.yaml -- both
+  # are directory operations, so this is required even though the file's
+  # own mode above already covers reading it.
+  sudo chgrp sgcia /etc/sgcia
+  sudo chmod 770 /etc/sgcia
   sudo cp "$REPO_ROOT/packaging/systemd/sgcia.service" /etc/systemd/system/sgcia.service
   if [ ! -f /etc/sgcia/sgcia.env ]; then
     sudo cp "$REPO_ROOT/packaging/systemd/sgcia.env.example" /etc/sgcia/sgcia.env
