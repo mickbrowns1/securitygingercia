@@ -950,17 +950,48 @@ outbound access still work). Don't enable this without deciding where
 the fleet server itself will run and who's responsible for keeping it
 up -- it's real infrastructure, not just a config flag.
 
-This is Phase 1: read-only inventory and health reporting only. There's
-no remote config push, no groups/tags, no fleet-wide log/topology view
-yet -- an agent enrolled today can be seen, not centrally managed.
+Beyond the base inventory/health view, the fleet server can also:
+
+- **Push a new config** to one agent or to every agent carrying a given
+  tag -- the target validates it (`sgcia-otelcol validate`) before ever
+  touching its live file, and reports back success/failure. A rollback
+  re-sends whatever config was last successfully applied.
+- **Push a new agent binary** the same way (upload a build once, then
+  push it to one agent or by tag) -- the agent verifies the download's
+  content hash and proves the new binary actually runs (`--version`
+  exits 0) before atomically swapping it in and restarting. Rollback
+  re-sends the last-known-good version; the fleet server already has
+  every uploaded version on disk, so there's nothing for the agent
+  itself to keep a backup copy of.
+- **Tag agents** (free-text labels like `role:collector`, `env:prod`) to
+  scope the bulk config/binary pushes above, and filter the agent list
+  by tag.
+- **Compare topology** for any set of selected agents side by side (the
+  same Sankey diagram the per-agent web UI shows, one per agent).
+- **Flag flapping agents** -- restarted 3+ times within a 10-minute
+  window, derived server-side from a `started_at` change across
+  reports, no agent-side change needed.
+- **Flag config drift** -- an agent's actually-running config (reported
+  via OpAMP's `EffectiveConfig` mechanism, checked against the live file
+  every ~15s) no longer matching what the fleet last pushed, e.g. someone
+  hand-edited it directly on the box.
+- **Show per-agent process metrics** (CPU time, memory RSS, heap) pulled
+  from the same `:8888/metrics` endpoint the agent already scrapes for
+  its own throughput counters.
+
+An agent enrolled today is centrally managed, not just visible.
 
 To run the fleet server:
 
 ```bash
 cd fleet/sgcia-fleet-server
 go build -o sgcia-fleet-server .
-SGCIA_FLEET_TOKEN=<a-real-secret> ./sgcia-fleet-server -listen 0.0.0.0:4320 -db sgcia-fleet.db
+SGCIA_FLEET_TOKEN=<a-real-secret> ./sgcia-fleet-server -listen 0.0.0.0:4320 -db sgcia-fleet.db -packages-dir ./packages
 ```
+
+`-packages-dir` is where uploaded agent binaries are stored on disk
+(metadata lives in the SQLite db alongside everything else; the bytes
+live here) -- defaults to `./packages` if omitted.
 
 Then open `http://<fleet-server-host>:4320/` for the agent list. Leave
 `SGCIA_FLEET_TOKEN` unset only for local testing -- with it unset, any
