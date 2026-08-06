@@ -95,6 +95,117 @@ function TagsCell({ agent, onSaved }) {
   );
 }
 
+// sumAcrossAgents adds up one numeric field from one snapshot section
+// (receivers/pipelines/exporters) across every component of that kind on
+// every agent -- e.g. sumAcrossAgents(agents, "receivers", "events_in") is
+// the fleet's true total ingest, matching the same events_in-not-
+// events_out principle the per-agent Topology view already established
+// (an exporter's own events_in can be inflated by fan-out, a receiver's
+// can't).
+function sumAcrossAgents(agents, section, field) {
+  let total = 0;
+  for (const a of agents) {
+    const bucket = a.snapshot?.[section];
+    if (!bucket) continue;
+    for (const name in bucket) {
+      total += bucket[name][field] || 0;
+    }
+  }
+  return total;
+}
+
+// StatsPanel is a per-agent expandable row showing the same
+// receivers/pipelines/exporters breakdown the agent's own Health view
+// shows -- this data already arrives with every health report, it just
+// wasn't surfaced anywhere in the fleet UI until now.
+function StatsPanel({ agent }) {
+  const snap = agent.snapshot;
+  if (!snap) return <div className="empty-state">No snapshot reported yet.</div>;
+
+  const receivers = Object.entries(snap.receivers || {});
+  const pipelines = Object.entries(snap.pipelines || {});
+  const exporters = Object.entries(snap.exporters || {});
+
+  return (
+    <div className="stats-panel">
+      <div className="stats-group">
+        <h3>Receivers</h3>
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Receiver</th>
+              <th className="numeric">Events in</th>
+            </tr>
+          </thead>
+          <tbody>
+            {receivers.map(([name, r]) => (
+              <tr key={name}>
+                <td>{name}</td>
+                <td className="numeric">{r.events_in}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="stats-group">
+        <h3>Pipelines</h3>
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Pipeline</th>
+              <th className="numeric">In</th>
+              <th className="numeric">Out</th>
+              <th className="numeric">Dropped</th>
+              <th className="numeric">Parse errors</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pipelines.map(([name, p]) => (
+              <tr key={name} className={p.events_dropped || p.parse_errors ? "row-problem" : undefined}>
+                <td>{name}</td>
+                <td className="numeric">{p.events_in}</td>
+                <td className="numeric">{p.events_out}</td>
+                <td className="numeric">{p.events_dropped}</td>
+                <td className="numeric">{p.parse_errors}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="stats-group">
+        <h3>Exporters</h3>
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Exporter</th>
+              <th className="numeric">In</th>
+              <th className="numeric">Sent</th>
+              <th className="numeric">Failed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {exporters.map(([name, e]) => (
+              <tr key={name} className={e.batches_failed ? "row-problem" : undefined}>
+                <td>
+                  {name}
+                  {e.last_error?.message && (
+                    <span className="err-indicator" title={e.last_error.message}>
+                      !
+                    </span>
+                  )}
+                </td>
+                <td className="numeric">{e.events_in}</td>
+                <td className="numeric">{e.batches_sent}</td>
+                <td className="numeric">{e.batches_failed}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // PushConfigPanel is a per-agent expandable row -- a plain textarea +
 // button, not a modal, matching this UI's existing style. Reused as-is
 // for the bulk-by-tag form below (same shape, different endpoint).
@@ -135,6 +246,7 @@ export default function App() {
   const [connError, setConnError] = useState("");
   const [tagFilter, setTagFilter] = useState("");
   const [pushTargetId, setPushTargetId] = useState(null);
+  const [statsTargetId, setStatsTargetId] = useState(null);
   const [bulkTag, setBulkTag] = useState("");
 
   useInterval(() => {
@@ -167,6 +279,10 @@ export default function App() {
 
   const healthyCount = agents.filter((a) => a.healthy).length;
   const unhealthyCount = agents.length - healthyCount;
+  const totalEventsIn = sumAcrossAgents(agents, "receivers", "events_in");
+  const totalDropped = sumAcrossAgents(agents, "pipelines", "events_dropped");
+  const totalParseErrors = sumAcrossAgents(agents, "pipelines", "parse_errors");
+  const totalBatchesFailed = sumAcrossAgents(agents, "exporters", "batches_failed");
 
   return (
     <>
@@ -183,6 +299,10 @@ export default function App() {
             <SummaryItem label="Agents" value={agents.length} />
             <SummaryItem label="Healthy" value={healthyCount} />
             <SummaryItem label="Unhealthy" value={unhealthyCount} />
+            <SummaryItem label="Total events in" value={totalEventsIn} />
+            <SummaryItem label="Total dropped" value={totalDropped} />
+            <SummaryItem label="Total parse errors" value={totalParseErrors} />
+            <SummaryItem label="Total batches failed" value={totalBatchesFailed} />
           </div>
         </div>
 
@@ -212,6 +332,7 @@ export default function App() {
                   <th>Drill down</th>
                   <th></th>
                   <th></th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
@@ -237,6 +358,11 @@ export default function App() {
                         <DrilldownHint agent={a} />
                       </td>
                       <td>
+                        <button type="button" onClick={() => setStatsTargetId(statsTargetId === a.id ? null : a.id)}>
+                          {statsTargetId === a.id ? "Hide stats" : "Stats"}
+                        </button>
+                      </td>
+                      <td>
                         <button type="button" onClick={() => setPushTargetId(pushTargetId === a.id ? null : a.id)}>
                           {pushTargetId === a.id ? "Cancel" : "Push config"}
                         </button>
@@ -247,9 +373,16 @@ export default function App() {
                         </button>
                       </td>
                     </tr>
+                    {statsTargetId === a.id && (
+                      <tr>
+                        <td colSpan={9}>
+                          <StatsPanel agent={a} />
+                        </td>
+                      </tr>
+                    )}
                     {pushTargetId === a.id && (
                       <tr>
-                        <td colSpan={8}>
+                        <td colSpan={9}>
                           <PushConfigPanel
                             placeholder={`Full config.yaml to push to ${a.hostname || a.id}...`}
                             onPush={(text) => sendJSON("POST", `agents/${a.id}/config`, { config_yaml: text })}
