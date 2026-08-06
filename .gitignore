@@ -5,6 +5,9 @@
 *.checkpoint.json.tmp
 .DS_Store
 
+# Internal architecture doc generated for the eng team -- not meant for the repo.
+/ARCHITECTURE.md
+
 # Go build artifacts: OCB regenerates these from otelcol/builder-config.yaml
 # (main.go, go.mod, go.sum, the compiled binary itself).
 /otelcol/dist/

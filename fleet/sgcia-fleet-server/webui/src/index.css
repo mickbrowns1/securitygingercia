@@ -217,18 +217,11 @@ main { padding: 20px; max-width: 1100px; margin: 0 auto; }
 
 .conn-status.down { color: var(--err); }
 
-/* Consolidates what used to be five separate per-agent action buttons
-   into one dropdown -- see App.jsx's ActionsMenu. */
-.actions-menu {
-  position: relative;
-  display: inline-block;
-}
-
-/* The dropdown trigger itself -- pill-shaped and themed, unlike the
-   plain browser-default buttons the rest of this UI still uses, since
-   this is the one button every Agents row repeats and is worth making
-   feel native to the dark theme rather than a stock light-gray box. */
-.actions-menu > button {
+/* Themed, pill-shaped baseline for every plain button in this app (Push,
+   Upload, the Actions dropdown trigger, etc.) -- instead of the stock
+   light-gray browser-default box. .actions-menu-item below overrides
+   this deliberately (those are menu-row items, not standalone buttons). */
+button {
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 999px;
@@ -238,9 +231,22 @@ main { padding: 20px; max-width: 1100px; margin: 0 auto; }
   cursor: pointer;
 }
 
-.actions-menu > button:hover {
+button:hover:not(:disabled) {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+button:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* Consolidates what used to be five separate per-agent action buttons
+   into one dropdown -- see App.jsx's ActionsMenu. */
+.actions-menu {
+  position: relative;
+  display: inline-block;
 }
 
 .actions-menu-panel {
@@ -333,6 +339,23 @@ main { padding: 20px; max-width: 1100px; margin: 0 auto; }
   flex-direction: column;
   gap: 8px;
   max-width: 600px;
+}
+
+/* Buttons inside a push-panel would otherwise stretch to the column's
+   full width (flex-direction: column's default align-items: stretch) --
+   sizing to content keeps the pill shape the global `button` rule
+   already gives them, instead of a big rectangle. */
+.push-panel button {
+  align-self: flex-start;
+}
+
+.push-panel select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 10px;
+  font-size: 13px;
 }
 
 .push-textarea {

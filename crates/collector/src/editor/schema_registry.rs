@@ -350,6 +350,32 @@ const STATUSCFG_FIELDS: &[FieldSpec] = &[
         Some("http://localhost:8888/metrics"),
         "Where this collector's own internal Prometheus telemetry is exposed (service.telemetry.metrics in this same file) -- scraped on every /status request.",
     ),
+    // Fleet management (all three optional, off by default -- leaving
+    // fleet_server_url blank is what disables it entirely). This is a
+    // real security-posture change: it's the only thing in this project
+    // that gives the agent an outbound network dependency. See README.md's
+    // "Fleet management" section before setting it.
+    f(
+        "fleet_server_url",
+        FieldKind::Str,
+        false,
+        None,
+        "OpAMP WebSocket endpoint of a central sgcia-fleet-server to report health/inventory to -- e.g. ws://fleet.example.com:4320/v1/opamp. Leave blank to keep this agent fully standalone (the default).",
+    ),
+    f(
+        "fleet_token",
+        FieldKind::Str,
+        false,
+        None,
+        "Shared bearer token the fleet server requires to enroll -- only meaningful if fleet_server_url is set. Use ${SOME_VAR} to read it from an environment variable instead of writing the real secret here, same as the HEC token fields above.",
+    ),
+    f(
+        "fleet_instance_id_path",
+        FieldKind::Str,
+        false,
+        Some("/var/lib/sgcia/sgcia-fleet-instance-uid"),
+        "Where this agent persists its random OpAMP instance ID so it reconnects as the same agent across restarts, instead of enrolling as a new one every time (the fleet server would otherwise accumulate a stale duplicate row per restart). Leave blank only if you deliberately want a fresh identity on every restart.",
+    ),
 ];
 
 // --- Operators (pkg/stanza vocabulary, nested inside a receiver) ---
