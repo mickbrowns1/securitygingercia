@@ -32,9 +32,22 @@ type ExporterSnapshot struct {
 	LastError     *LastError `json:"last_error"`
 }
 
+// ProcessSnapshot is this agent's own resource usage, straight from the
+// otelcol_process_* family the collector's own default self-telemetry
+// already exposes at MetricsURL (:8888/metrics) -- confirmed live via
+// otelcol_process_cpu_seconds/_memory_rss/_runtime_heap_alloc_bytes, none
+// of which carry a receiver/exporter label (one process-wide value each,
+// unlike the labeled counters above).
+type ProcessSnapshot struct {
+	CPUSeconds     float64 `json:"cpu_seconds"`
+	MemoryRSSBytes uint64  `json:"memory_rss_bytes"`
+	HeapAllocBytes uint64  `json:"heap_alloc_bytes"`
+}
+
 type MetricsSnapshot struct {
 	StartedAt     time.Time                   `json:"started_at"`
 	UptimeSeconds int64                       `json:"uptime_seconds"`
+	Process       ProcessSnapshot             `json:"process"`
 	Receivers     map[string]ReceiverSnapshot `json:"receivers"`
 	Pipelines     map[string]PipelineSnapshot `json:"pipelines"`
 	Exporters     map[string]ExporterSnapshot `json:"exporters"`

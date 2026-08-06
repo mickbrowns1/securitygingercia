@@ -1,17 +1,21 @@
 package statuscfgextension // import "github.com/mickbrowns1/securitygingercia/otelcol/extensions/statuscfgextension"
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -69,6 +73,12 @@ func (l zapOpampLogger) Errorf(_ context.Context, format string, v ...any) {
 type opampReporter struct {
 	client client.OpAMPClient
 	cancel context.CancelFunc
+
+	// configPath/lastEffectiveConfigHash back the mid-session config-drift
+	// check in reportOnce -- single-goroutine-owned (only reportLoop's own
+	// goroutine ever touches lastEffectiveConfigHash), so no mutex needed.
+	configPath              string
+	lastEffectiveConfigHash string
 }
 
 // startOpampReporter connects to cfg.FleetServerURL and begins periodic
@@ -104,12 +114,42 @@ func startOpampReporter(cfg *Config, logger *zap.Logger, endpoint, buildVersion 
 	}); err != nil {
 		return nil, err
 	}
+	// AcceptsPackages/ReportsPackageStatuses (Phase 4) require a
+	// PackagesStateProvider to be in place before capabilities are
+	// validated -- but the client-level c.SetCapabilities() validates
+	// immediately against c.PackagesStateProvider, which opamp-go's own
+	// PrepareStart only assigns from StartSettings.PackagesStateProvider
+	// *during* c.Start() (see clientcommon.go: PackagesStateProvider is
+	// wired in, then capabilities are (re-)validated, in that order).
+	// Calling the client-level setter here -- before Start() even runs --
+	// would validate against a still-nil provider and fail every time.
+	// StartSettings.Capabilities (marked deprecated in favor of
+	// SetCapabilities(), which normally IS the better call) is the one
+	// path that lets PrepareStart validate capabilities in the correct
+	// order relative to the provider, so it's used deliberately here
+	// instead -- confirmed live: every one of these agents failed to
+	// start with "PackagesStateProvider must be set" using the
+	// SetCapabilities()-before-Start() ordering, and started cleanly once
+	// switched to this field.
 	capabilities := protobufs.AgentCapabilities_AgentCapabilities_ReportsStatus |
 		protobufs.AgentCapabilities_AgentCapabilities_ReportsHealth |
 		protobufs.AgentCapabilities_AgentCapabilities_AcceptsRemoteConfig |
-		protobufs.AgentCapabilities_AgentCapabilities_ReportsRemoteConfig
-	if err := c.SetCapabilities(&capabilities); err != nil {
-		return nil, err
+		protobufs.AgentCapabilities_AgentCapabilities_ReportsRemoteConfig |
+		protobufs.AgentCapabilities_AgentCapabilities_AcceptsPackages |
+		protobufs.AgentCapabilities_AgentCapabilities_ReportsPackageStatuses |
+		protobufs.AgentCapabilities_AgentCapabilities_ReportsEffectiveConfig
+
+	// packagesProvider backs the AcceptsPackages/ReportsPackageStatuses
+	// capabilities above -- required by the SDK to even receive a
+	// PackagesAvailable offer (see receivedprocessor.go's hasCapability
+	// gate), but this project's actual safety logic (hash verification,
+	// proving the new binary runs, atomic swap, restart) lives entirely in
+	// its UpdateContent method below, not in opamp-go's generic syncing
+	// machinery -- the syncer just handles the HTTP download and status
+	// bookkeeping around it.
+	packagesProvider, err := newSimplePackagesStateProvider(logger)
+	if err != nil {
+		return nil, fmt.Errorf("preparing package state provider: %w", err)
 	}
 
 	header := http.Header{}
@@ -118,10 +158,12 @@ func startOpampReporter(cfg *Config, logger *zap.Logger, endpoint, buildVersion 
 	}
 
 	startCtx, cancel := context.WithCancel(context.Background())
-	err := c.Start(startCtx, types.StartSettings{
-		OpAMPServerURL: cfg.FleetServerURL,
-		InstanceUid:    instanceUID,
-		Header:         header,
+	err = c.Start(startCtx, types.StartSettings{
+		OpAMPServerURL:        cfg.FleetServerURL,
+		InstanceUid:           instanceUID,
+		Header:                header,
+		PackagesStateProvider: packagesProvider,
+		Capabilities:          capabilities,
 		Callbacks: types.Callbacks{
 			OnConnect: func(_ context.Context) {
 				logger.Info("connected to fleet server", zap.String("url", cfg.FleetServerURL))
@@ -133,16 +175,39 @@ func startOpampReporter(cfg *Config, logger *zap.Logger, endpoint, buildVersion 
 				logger.Warn("fleet server reported an error", zap.String("message", err.GetErrorMessage()))
 			},
 			OnMessage: func(_ context.Context, msg *types.MessageData) {
-				if msg.RemoteConfig == nil {
-					return
+				if msg.RemoteConfig != nil {
+					// Validation + the subprocess call can take a moment; the
+					// client library's own docs recommend returning from
+					// OnMessage quickly and doing this kind of work async. A
+					// fresh context is used rather than the one OnMessage was
+					// called with, since that one isn't guaranteed to outlive
+					// OnMessage's own return.
+					go handleRemoteConfig(c, cfg.ConfigPath, logger, msg.RemoteConfig)
 				}
-				// Validation + the subprocess call can take a moment; the
-				// client library's own docs recommend returning from
-				// OnMessage quickly and doing this kind of work async. A
-				// fresh context is used rather than the one OnMessage was
-				// called with, since that one isn't guaranteed to outlive
-				// OnMessage's own return.
-				go handleRemoteConfig(c, cfg.ConfigPath, logger, msg.RemoteConfig)
+				if msg.PackageSyncer != nil {
+					// Sync itself returns quickly (it locks a mutex and hands
+					// off to a background goroutine internally) -- the extra
+					// goroutine here just keeps this callback consistent with
+					// RemoteConfig's own "never block OnMessage" handling
+					// above, and gives Sync a context independent of
+					// OnMessage's own lifetime.
+					go func() {
+						if err := msg.PackageSyncer.Sync(context.Background()); err != nil {
+							logger.Warn("starting package sync", zap.Error(err))
+						}
+					}()
+				}
+			},
+			// GetEffectiveConfig backs ReportsEffectiveConfig above -- the
+			// SDK calls this itself on every (re)connect (PrepareFirstMessage),
+			// so this alone reports the live config once for free whenever
+			// the WebSocket reconnects. Catching drift *without* a reconnect
+			// (an operator hand-editing the file mid-session) is handled
+			// separately below, by reportOnce explicitly calling
+			// client.UpdateEffectiveConfig when it notices the file's
+			// content hash has changed.
+			GetEffectiveConfig: func(_ context.Context) (*protobufs.EffectiveConfig, error) {
+				return buildEffectiveConfig(cfg.ConfigPath)
 			},
 		},
 	})
@@ -151,9 +216,26 @@ func startOpampReporter(cfg *Config, logger *zap.Logger, endpoint, buildVersion 
 		return nil, err
 	}
 
-	reporter := &opampReporter{client: c, cancel: cancel}
+	reporter := &opampReporter{client: c, cancel: cancel, configPath: cfg.ConfigPath}
 	go reporter.reportLoop(startCtx, logger, reportFn)
 	return reporter, nil
+}
+
+// buildEffectiveConfig wraps the agent's currently-loaded config file for
+// OpAMP's EffectiveConfig mechanism -- read fresh from disk on every call,
+// per GetEffectiveConfig's own contract, rather than cached.
+func buildEffectiveConfig(configPath string) (*protobufs.EffectiveConfig, error) {
+	body, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading config for effective-config report: %w", err)
+	}
+	return &protobufs.EffectiveConfig{
+		ConfigMap: &protobufs.AgentConfigMap{
+			ConfigMap: map[string]*protobufs.AgentConfigFile{
+				"": {Body: body, ContentType: "text/yaml"},
+			},
+		},
+	}, nil
 }
 
 func (r *opampReporter) reportLoop(ctx context.Context, logger *zap.Logger, reportFn func() (fleetReport, error)) {
@@ -193,6 +275,46 @@ func (r *opampReporter) reportOnce(logger *zap.Logger, reportFn func() (fleetRep
 	}); err != nil {
 		logger.Warn("sending snapshot to fleet server", zap.Error(err))
 	}
+
+	r.checkEffectiveConfigDrift(logger)
+}
+
+// checkEffectiveConfigDrift re-reads the live config file and calls
+// client.UpdateEffectiveConfig only when its content hash has changed
+// since the last time this agent reported it -- piggybacking on the
+// existing reportInterval tick rather than adding a separate
+// file-watcher/ticker, since a report is already due every 15s regardless
+// and this is fundamentally an operator-error signal, not a real-time one.
+// The very first tick after connecting always sends once more (comparing
+// against the zero-value lastEffectiveConfigHash), duplicating what
+// PrepareFirstMessage already sent at connect -- harmless, since the
+// fleet server just records the same hash twice.
+func (r *opampReporter) checkEffectiveConfigDrift(logger *zap.Logger) {
+	hashHex, err := configFileHash(r.configPath)
+	if err != nil {
+		logger.Warn("reading config for drift check", zap.Error(err))
+		return
+	}
+	if hashHex == r.lastEffectiveConfigHash {
+		return
+	}
+	if err := r.client.UpdateEffectiveConfig(context.Background()); err != nil {
+		logger.Warn("reporting effective config", zap.Error(err))
+		return
+	}
+	r.lastEffectiveConfigHash = hashHex
+}
+
+// configFileHash is the pure, testable half of checkEffectiveConfigDrift --
+// hashing is separated from the actual UpdateEffectiveConfig call so the
+// "did it change" logic can be tested without a live OpAMP connection.
+func configFileHash(configPath string) (string, error) {
+	body, err := os.ReadFile(configPath)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.Sum256(body)
+	return hex.EncodeToString(hash[:]), nil
 }
 
 // validateTimeout bounds the self-validate subprocess -- validate is fast;
@@ -235,6 +357,209 @@ func handleRemoteConfig(c client.OpAMPClient, configPath string, logger *zap.Log
 	time.AfterFunc(restartDelay, func() {
 		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
 	})
+}
+
+// packageVersionCheckTimeout bounds a downloaded binary's own --version
+// subprocess -- the package equivalent of validateTimeout above. There's
+// no dedicated `validate`-style subcommand for an arbitrary executable, so
+// proving it actually runs (and exits 0) is this project's stand-in
+// safety gate before ever swapping it in for the live binary.
+const packageVersionCheckTimeout = 30 * time.Second
+
+// simplePackagesStateProvider is a minimal implementation of opamp-go's
+// types.PackagesStateProvider -- required to set the
+// AcceptsPackages/ReportsPackageStatuses capabilities at all (see
+// SetCapabilities above), even though this project's real
+// verify/swap/restart logic lives entirely in UpdateContent below, not in
+// the SDK's generic PackagesSyncer bookkeeping around it.
+//
+// State is kept in memory only, deliberately not persisted across
+// restarts: a package push is a one-shot operator action, and a
+// successful install always ends in exactly the restart that would
+// invalidate any remembered state anyway. So "start fresh on every
+// process start" is the correct behavior here, not a shortcut -- it also
+// means a repushed identical version is always re-verified and re-applied
+// rather than silently skipped as "already installed", which matches what
+// an operator pushing it again would actually expect.
+type simplePackagesStateProvider struct {
+	mu              sync.Mutex
+	allPackagesHash []byte
+	packages        map[string]types.PackageState
+	fileContentHash map[string][]byte
+	lastStatuses    *protobufs.PackageStatuses
+
+	selfPath string
+	logger   *zap.Logger
+}
+
+func newSimplePackagesStateProvider(logger *zap.Logger) (*simplePackagesStateProvider, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("locating own binary to receive package updates: %w", err)
+	}
+	return &simplePackagesStateProvider{
+		packages:        make(map[string]types.PackageState),
+		fileContentHash: make(map[string][]byte),
+		selfPath:        self,
+		logger:          logger,
+	}, nil
+}
+
+func (p *simplePackagesStateProvider) AllPackagesHash() ([]byte, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.allPackagesHash, nil
+}
+
+func (p *simplePackagesStateProvider) SetAllPackagesHash(hash []byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.allPackagesHash = hash
+	return nil
+}
+
+func (p *simplePackagesStateProvider) Packages() ([]string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	names := make([]string, 0, len(p.packages))
+	for name := range p.packages {
+		names = append(names, name)
+	}
+	return names, nil
+}
+
+func (p *simplePackagesStateProvider) PackageState(packageName string) (types.PackageState, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	state, ok := p.packages[packageName]
+	if !ok {
+		return types.PackageState{Exists: false}, nil
+	}
+	return state, nil
+}
+
+func (p *simplePackagesStateProvider) SetPackageState(packageName string, state types.PackageState) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.packages[packageName] = state
+	return nil
+}
+
+func (p *simplePackagesStateProvider) CreatePackage(packageName string, typ protobufs.PackageType) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, exists := p.packages[packageName]; exists {
+		return fmt.Errorf("package %s already exists", packageName)
+	}
+	p.packages[packageName] = types.PackageState{Exists: true, Type: typ}
+	return nil
+}
+
+func (p *simplePackagesStateProvider) FileContentHash(packageName string) ([]byte, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.fileContentHash[packageName], nil
+}
+
+// UpdateContent is where this project's actual package-rollout safety
+// property lives, the direct analogue of validateAndApply above: data is
+// streamed to a temp file next to the live binary (same directory, so the
+// eventual rename is atomic) while hashing it, the hash is checked against
+// what the server offered, the candidate is made executable and proven to
+// actually run (`<candidate> --version`, exit 0 required) -- and only then
+// is it renamed over the live binary. Any failure at any step leaves the
+// live binary completely untouched and is returned as an error, which the
+// SDK's packagesSyncer turns into an InstallFailed status back to the
+// fleet server. A successful swap schedules the same kind of
+// self-SIGTERM-to-restart Phase 2's config push already established,
+// after restartDelay gives the resulting Installed status a moment to
+// flush over the still-open connection first.
+func (p *simplePackagesStateProvider) UpdateContent(ctx context.Context, packageName string, data io.Reader, contentHash, _ []byte) error {
+	tmpPath := p.selfPath + ".tmp"
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+	if err != nil {
+		return fmt.Errorf("creating candidate binary file: %w", err)
+	}
+	hasher := sha256.New()
+	_, copyErr := io.Copy(io.MultiWriter(f, hasher), data)
+	closeErr := f.Close()
+	if copyErr != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("downloading candidate binary: %w", copyErr)
+	}
+	if closeErr != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("writing candidate binary: %w", closeErr)
+	}
+
+	gotHash := hasher.Sum(nil)
+	if !bytes.Equal(gotHash, contentHash) {
+		os.Remove(tmpPath)
+		return fmt.Errorf("downloaded binary's hash %x does not match the offered hash %x", gotHash, contentHash)
+	}
+
+	if err := verifyCandidateBinaryRuns(ctx, tmpPath); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+
+	if err := os.Rename(tmpPath, p.selfPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("applying downloaded binary: %w", err)
+	}
+
+	p.mu.Lock()
+	p.fileContentHash[packageName] = gotHash
+	p.mu.Unlock()
+
+	p.logger.Info("applied pushed package, restarting to pick it up", zap.String("package", packageName))
+	time.AfterFunc(restartDelay, func() {
+		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	})
+	return nil
+}
+
+// verifyCandidateBinaryRuns is the package equivalent of shelling out to
+// `validate` for a config: there's no such subcommand for an arbitrary
+// binary, so running --version and requiring a clean exit is this
+// project's stand-in proof that the candidate is a real, working
+// executable before it's ever trusted to replace the live one.
+func verifyCandidateBinaryRuns(ctx context.Context, path string) error {
+	if err := os.Chmod(path, 0o755); err != nil {
+		return fmt.Errorf("making candidate binary executable: %w", err)
+	}
+
+	checkCtx, cancel := context.WithTimeout(ctx, packageVersionCheckTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(checkCtx, path, "--version")
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return errors.New(validateErrorMessage(path, stdout.String(), stderr.String(), err))
+	}
+	return nil
+}
+
+func (p *simplePackagesStateProvider) DeletePackage(packageName string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.packages, packageName)
+	delete(p.fileContentHash, packageName)
+	return nil
+}
+
+func (p *simplePackagesStateProvider) LastReportedStatuses() (*protobufs.PackageStatuses, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastStatuses, nil
+}
+
+func (p *simplePackagesStateProvider) SetLastReportedStatuses(statuses *protobufs.PackageStatuses) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.lastStatuses = statuses
+	return nil
 }
 
 // validateAndApply writes body to a temp file next to configPath (same

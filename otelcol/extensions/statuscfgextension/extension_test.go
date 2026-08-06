@@ -51,6 +51,12 @@ func TestExtension_StatusAndConfigEndToEnd(t *testing.T) {
 	if _, ok := snapshot.Pipelines["logs/syslog"]; !ok {
 		t.Errorf("pipelines = %v, missing logs/syslog", snapshot.Pipelines)
 	}
+	if snapshot.Process.CPUSeconds != 2.75 {
+		t.Errorf("process.cpu_seconds = %v, want 2.75", snapshot.Process.CPUSeconds)
+	}
+	if snapshot.Process.MemoryRSSBytes == 0 {
+		t.Errorf("process.memory_rss_bytes = 0, want a non-zero value from samplePromText")
+	}
 
 	configResp, err := client.Get("http://" + addr + "/config")
 	if err != nil {

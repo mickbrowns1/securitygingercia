@@ -1,6 +1,9 @@
 package statuscfgextension // import "github.com/mickbrowns1/securitygingercia/otelcol/extensions/statuscfgextension"
 
 import (
+	"bytes"
+	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"os"
@@ -8,8 +11,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/open-telemetry/opamp-go/client/types"
+	"github.com/open-telemetry/opamp-go/protobufs"
 	"go.uber.org/zap"
 )
+
+// Compile-time check that simplePackagesStateProvider actually satisfies
+// the interface the OpAMP SDK requires for AcceptsPackages/
+// ReportsPackageStatuses to work at all -- see startOpampReporter's
+// SetCapabilities comment for why this is required, not optional.
+var _ types.PackagesStateProvider = (*simplePackagesStateProvider)(nil)
 
 // TestFleetReport_MarshalsSnapshotAndTopologyAtTheSameLevel confirms
 // embedding MetricsSnapshot in fleetReport actually flattens its fields
@@ -138,6 +149,217 @@ func TestValidateErrorMessage_FallbackChain(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// newTestPackagesStateProvider builds a simplePackagesStateProvider
+// pointed at a fake "self" binary path under t.TempDir(), bypassing
+// os.Executable() -- the constructor newSimplePackagesStateProvider
+// always resolves the real running test binary, which isn't what these
+// tests want to exercise being overwritten.
+func newTestPackagesStateProvider(t *testing.T, selfContent string) *simplePackagesStateProvider {
+	t.Helper()
+	selfPath := filepath.Join(t.TempDir(), "self-binary")
+	if err := os.WriteFile(selfPath, []byte(selfContent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return &simplePackagesStateProvider{
+		packages:        make(map[string]types.PackageState),
+		fileContentHash: make(map[string][]byte),
+		selfPath:        selfPath,
+		logger:          zap.NewNop(),
+	}
+}
+
+func TestUpdateContent_SuccessAppliesBinaryAtomically(t *testing.T) {
+	provider := newTestPackagesStateProvider(t, "old binary content")
+
+	newContent := []byte("#!/bin/sh\nexit 0\n")
+	hash := sha256.Sum256(newContent)
+
+	if err := provider.UpdateContent(context.Background(), "sgcia-otelcol", bytes.NewReader(newContent), hash[:], nil); err != nil {
+		t.Fatalf("expected success, got: %v", err)
+	}
+
+	got, err := os.ReadFile(provider.selfPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(newContent) {
+		t.Fatalf("expected the live binary to be replaced, got %q", got)
+	}
+	if _, err := os.Stat(provider.selfPath + ".tmp"); !os.IsNotExist(err) {
+		t.Fatal("expected the temp file to be gone after a successful rename")
+	}
+	if gotHash, _ := provider.FileContentHash("sgcia-otelcol"); !bytes.Equal(gotHash, hash[:]) {
+		t.Fatalf("expected FileContentHash to be recorded after a successful update, got %x", gotHash)
+	}
+}
+
+func TestUpdateContent_HashMismatchNeverTouchesLiveBinary(t *testing.T) {
+	provider := newTestPackagesStateProvider(t, "old binary content")
+
+	newContent := []byte("#!/bin/sh\nexit 0\n")
+	wrongHash := sha256.Sum256([]byte("something else entirely"))
+
+	err := provider.UpdateContent(context.Background(), "sgcia-otelcol", bytes.NewReader(newContent), wrongHash[:], nil)
+	if err == nil {
+		t.Fatal("expected a hash mismatch error")
+	}
+	if !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("expected a hash-mismatch message, got: %v", err)
+	}
+
+	got, readErr := os.ReadFile(provider.selfPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "old binary content" {
+		t.Fatalf("live binary must be untouched on hash mismatch, got %q", got)
+	}
+	if _, statErr := os.Stat(provider.selfPath + ".tmp"); !os.IsNotExist(statErr) {
+		t.Fatal("expected the rejected candidate's temp file to be cleaned up")
+	}
+}
+
+func TestUpdateContent_VersionCheckFailureNeverTouchesLiveBinary(t *testing.T) {
+	provider := newTestPackagesStateProvider(t, "old binary content")
+
+	newContent := []byte("#!/bin/sh\necho 'boom: this is not a real collector binary' >&2\nexit 1\n")
+	hash := sha256.Sum256(newContent)
+
+	err := provider.UpdateContent(context.Background(), "sgcia-otelcol", bytes.NewReader(newContent), hash[:], nil)
+	if err == nil {
+		t.Fatal("expected the --version check to fail")
+	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("expected the fake binary's stderr in the error, got: %v", err)
+	}
+
+	got, readErr := os.ReadFile(provider.selfPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "old binary content" {
+		t.Fatalf("live binary must be untouched when the candidate fails to run, got %q", got)
+	}
+	if _, statErr := os.Stat(provider.selfPath + ".tmp"); !os.IsNotExist(statErr) {
+		t.Fatal("expected the rejected candidate's temp file to be cleaned up")
+	}
+}
+
+// fakeOpAMPClient is a minimal test double for client.OpAMPClient -- only
+// UpdateEffectiveConfig has real behavior (recording calls / returning a
+// configurable error); every other method is a no-op stub, since
+// checkEffectiveConfigDrift only ever calls that one.
+type fakeOpAMPClient struct {
+	updateEffectiveConfigCalls int
+	updateEffectiveConfigErr   error
+}
+
+func (f *fakeOpAMPClient) Start(context.Context, types.StartSettings) error          { return nil }
+func (f *fakeOpAMPClient) Stop(context.Context) error                                { return nil }
+func (f *fakeOpAMPClient) SetAgentDescription(*protobufs.AgentDescription) error     { return nil }
+func (f *fakeOpAMPClient) AgentDescription() *protobufs.AgentDescription             { return nil }
+func (f *fakeOpAMPClient) SetHealth(*protobufs.ComponentHealth) error                { return nil }
+func (f *fakeOpAMPClient) SetRemoteConfigStatus(*protobufs.RemoteConfigStatus) error { return nil }
+func (f *fakeOpAMPClient) SetPackageStatuses(*protobufs.PackageStatuses) error       { return nil }
+func (f *fakeOpAMPClient) SetCustomCapabilities(*protobufs.CustomCapabilities) error { return nil }
+func (f *fakeOpAMPClient) SetFlags(protobufs.AgentToServerFlags)                     {}
+func (f *fakeOpAMPClient) SetAvailableComponents(*protobufs.AvailableComponents) error {
+	return nil
+}
+func (f *fakeOpAMPClient) SetCapabilities(*protobufs.AgentCapabilities) error { return nil }
+func (f *fakeOpAMPClient) RequestConnectionSettings(*protobufs.ConnectionSettingsRequest) error {
+	return nil
+}
+func (f *fakeOpAMPClient) SendCustomMessage(*protobufs.CustomMessage) (chan struct{}, error) {
+	return nil, nil
+}
+func (f *fakeOpAMPClient) UpdateEffectiveConfig(context.Context) error {
+	f.updateEffectiveConfigCalls++
+	return f.updateEffectiveConfigErr
+}
+
+func TestBuildEffectiveConfig_WrapsFileContent(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("receivers: {}"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	ec, err := buildEffectiveConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := ec.GetConfigMap().GetConfigMap()[""]
+	if file == nil {
+		t.Fatal("expected a config file entry keyed by an empty string")
+	}
+	if string(file.GetBody()) != "receivers: {}" {
+		t.Fatalf("body = %q, want the file's exact content", file.GetBody())
+	}
+}
+
+func TestConfigFileHash_ChangesWithContentAndIsDeterministic(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("a: 1"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	h1, err := configFileHash(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2, err := configFileHash(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h1 != h2 {
+		t.Fatalf("expected the same hash for unchanged content, got %q then %q", h1, h2)
+	}
+
+	if err := os.WriteFile(configPath, []byte("a: 2"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	h3, err := configFileHash(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h3 == h1 {
+		t.Fatal("expected a different hash after the content changed")
+	}
+}
+
+func TestConfigFileHash_MissingFileReturnsError(t *testing.T) {
+	if _, err := configFileHash(filepath.Join(t.TempDir(), "does-not-exist.yaml")); err == nil {
+		t.Fatal("expected an error for a missing config file")
+	}
+}
+
+func TestCheckEffectiveConfigDrift_SendsOnFirstCheckAndOnChangeOnly(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("receivers: {}"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeOpAMPClient{}
+	r := &opampReporter{client: fake, configPath: configPath}
+
+	r.checkEffectiveConfigDrift(zap.NewNop())
+	if fake.updateEffectiveConfigCalls != 1 {
+		t.Fatalf("expected 1 call after the first check, got %d", fake.updateEffectiveConfigCalls)
+	}
+
+	r.checkEffectiveConfigDrift(zap.NewNop())
+	if fake.updateEffectiveConfigCalls != 1 {
+		t.Fatalf("expected no additional call when the file is unchanged, got %d total", fake.updateEffectiveConfigCalls)
+	}
+
+	if err := os.WriteFile(configPath, []byte("receivers: {}\n# edited by hand"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	r.checkEffectiveConfigDrift(zap.NewNop())
+	if fake.updateEffectiveConfigCalls != 2 {
+		t.Fatalf("expected a second call after the file changed, got %d total", fake.updateEffectiveConfigCalls)
 	}
 }
 

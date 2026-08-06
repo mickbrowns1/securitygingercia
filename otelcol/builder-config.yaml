@@ -9,7 +9,7 @@ dist:
   name: sgcia-otelcol
   description: Security Ginger Collect It All -- OTel-based collector engine
   output_path: ./dist
-  version: 0.1.0
+  version: 0.1.1
 
 receivers:
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/filelogreceiver v0.157.0

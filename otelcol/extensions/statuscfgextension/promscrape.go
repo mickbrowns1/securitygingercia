@@ -66,3 +66,15 @@ func sumByLabel(families map[string][]promSample, metric, label string) map[stri
 	}
 	return out
 }
+
+// firstValue returns a metric family's single value -- for families with
+// no meaningful label dimension (e.g. otelcol_process_* gauges/counters,
+// which report exactly one process-wide value per scrape), unlike
+// sumByLabel above which is for per-component counters keyed by label. 0
+// if the family wasn't present in this scrape.
+func firstValue(families map[string][]promSample, metric string) float64 {
+	if samples := families[metric]; len(samples) > 0 {
+		return samples[0].Value
+	}
+	return 0
+}

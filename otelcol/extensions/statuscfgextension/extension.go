@@ -131,9 +131,16 @@ func (e *statusCfgExtension) buildSnapshot() (MetricsSnapshot, error) {
 
 	pipelines := computePipelineSnapshots(e.resolved.pipelines, acceptedLog, sentLog, failedLog)
 
+	process := ProcessSnapshot{
+		CPUSeconds:     firstValue(families, "otelcol_process_cpu_seconds"),
+		MemoryRSSBytes: uint64(firstValue(families, "otelcol_process_memory_rss")),
+		HeapAllocBytes: uint64(firstValue(families, "otelcol_process_runtime_heap_alloc_bytes")),
+	}
+
 	return MetricsSnapshot{
 		StartedAt:     e.startedAt,
 		UptimeSeconds: int64(time.Since(e.startedAt).Seconds()),
+		Process:       process,
 		Receivers:     receivers,
 		Pipelines:     pipelines,
 		Exporters:     exporters,
