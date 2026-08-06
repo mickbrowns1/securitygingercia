@@ -1,6 +1,7 @@
 import { Fragment, useState } from "react";
 import { fetchJSON, sendJSON } from "./api.js";
 import { useInterval } from "./useInterval.js";
+import TopologyPanel from "./TopologyPanel.jsx";
 
 const POLL_MS = 5000;
 
@@ -248,6 +249,7 @@ export default function App() {
   const [pushTargetId, setPushTargetId] = useState(null);
   const [statsTargetId, setStatsTargetId] = useState(null);
   const [bulkTag, setBulkTag] = useState("");
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
 
   useInterval(() => {
     const path = "agents" + (tagFilter ? `?tag=${encodeURIComponent(tagFilter)}` : "");
@@ -264,6 +266,15 @@ export default function App() {
 
   function applyTagsLocally(id, tags) {
     setAgents((prev) => prev.map((a) => (a.id === id ? { ...a, tags } : a)));
+  }
+
+  function toggleSelected(id) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   }
 
   // Removes a stale/duplicate inventory row (e.g. left over from an agent
@@ -324,6 +335,7 @@ export default function App() {
             <table className="data-table">
               <thead>
                 <tr>
+                  <th title="Select for the Topology panel below">Compare</th>
                   <th>Host</th>
                   <th>Version</th>
                   <th>Health</th>
@@ -339,6 +351,9 @@ export default function App() {
                 {agents.map((a) => (
                   <Fragment key={a.id}>
                     <tr className={!a.healthy ? "row-problem" : undefined}>
+                      <td>
+                        <input type="checkbox" checked={selectedIds.has(a.id)} onChange={() => toggleSelected(a.id)} />
+                      </td>
                       <td>{a.hostname || a.id}</td>
                       <td>{a.service_version || "-"}</td>
                       <td>
@@ -375,14 +390,14 @@ export default function App() {
                     </tr>
                     {statsTargetId === a.id && (
                       <tr>
-                        <td colSpan={9}>
+                        <td colSpan={10}>
                           <StatsPanel agent={a} />
                         </td>
                       </tr>
                     )}
                     {pushTargetId === a.id && (
                       <tr>
-                        <td colSpan={9}>
+                        <td colSpan={10}>
                           <PushConfigPanel
                             placeholder={`Full config.yaml to push to ${a.hostname || a.id}...`}
                             onPush={(text) => sendJSON("POST", `agents/${a.id}/config`, { config_yaml: text })}
@@ -414,6 +429,17 @@ export default function App() {
                 })
               }
             />
+          )}
+        </div>
+
+        <div className="panel">
+          <h2>Topology</h2>
+          {selectedIds.size === 0 ? (
+            <div className="empty-state">Check one or more agents' "Compare" boxes above to see their topology diagrams here, stacked for comparison.</div>
+          ) : (
+            agents
+              .filter((a) => selectedIds.has(a.id))
+              .map((a) => <TopologyPanel key={a.id} agent={a} />)
           )}
         </div>
       </main>

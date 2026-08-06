@@ -1,6 +1,7 @@
 package statuscfgextension // import "github.com/mickbrowns1/securitygingercia/otelcol/extensions/statuscfgextension"
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +10,49 @@ import (
 
 	"go.uber.org/zap"
 )
+
+// TestFleetReport_MarshalsSnapshotAndTopologyAtTheSameLevel confirms
+// embedding MetricsSnapshot in fleetReport actually flattens its fields
+// to the top level alongside "topology", rather than nesting it under a
+// "MetricsSnapshot" key -- the fleet webui's Sankey view expects to feed
+// this same object in as both computeSankeyLayout(graph, status)
+// arguments (topology as the graph, everything else as the status), so
+// the shape matters, not just that the data is present somewhere.
+func TestFleetReport_MarshalsSnapshotAndTopologyAtTheSameLevel(t *testing.T) {
+	report := fleetReport{
+		MetricsSnapshot: MetricsSnapshot{
+			Receivers: map[string]ReceiverSnapshot{"syslog/udp": {EventsIn: 5}},
+		},
+		Topology: topologyGraph{
+			Nodes: []topologyNode{{ID: "syslog/udp", Type: "receiver"}},
+			Edges: []topologyEdge{{From: "syslog/udp", To: "logs/syslog"}},
+		},
+	}
+
+	data, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := decoded["receivers"]; !ok {
+		t.Fatalf("expected \"receivers\" at the top level (MetricsSnapshot should be flattened), got keys: %v", mapKeys(decoded))
+	}
+	if _, ok := decoded["MetricsSnapshot"]; ok {
+		t.Fatal("MetricsSnapshot should be flattened, not nested under its own key")
+	}
+	topo, ok := decoded["topology"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected a \"topology\" object, got keys: %v", mapKeys(decoded))
+	}
+	if _, ok := topo["nodes"]; !ok {
+		t.Fatal("expected topology.nodes")
+	}
+}
 
 // writeFakeValidateBinary writes a tiny shell script standing in for
 // `sgcia-otelcol validate` -- exits 0 (silently) if shouldFail is false,

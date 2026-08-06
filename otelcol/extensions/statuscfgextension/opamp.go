@@ -34,6 +34,20 @@ const (
 // intervals -- this is agent-to-server, not browser-to-agent.
 const reportInterval = 15 * time.Second
 
+// fleetReport is what actually goes out over OpAMP every reportInterval:
+// the same MetricsSnapshot the local /status endpoint already serves,
+// plus the structural topology graph the local /topology endpoint already
+// serves (topology.go's buildTopology()). Embedding MetricsSnapshot
+// flattens its fields to the top level, so the JSON shape is exactly
+// {receivers, pipelines, exporters, started_at, uptime_seconds, topology}
+// -- the fleet webui's Sankey view feeds this same object in as both of
+// computeSankeyLayout's arguments (topology as the graph, the rest as the
+// status), with no adaptation needed on either side.
+type fleetReport struct {
+	MetricsSnapshot
+	Topology topologyGraph `json:"topology"`
+}
+
 // zapOpampLogger adapts a *zap.Logger to opamp-go's client/types.Logger.
 type zapOpampLogger struct {
 	logger *zap.Logger
@@ -60,7 +74,7 @@ type opampReporter struct {
 // startOpampReporter connects to cfg.FleetServerURL and begins periodic
 // reporting. Returns (nil, nil) if fleet reporting isn't configured --
 // this is the opt-in gate; nothing about a plain install changes.
-func startOpampReporter(cfg *Config, logger *zap.Logger, endpoint, buildVersion string, snapshotFn func() (MetricsSnapshot, error)) (*opampReporter, error) {
+func startOpampReporter(cfg *Config, logger *zap.Logger, endpoint, buildVersion string, reportFn func() (fleetReport, error)) (*opampReporter, error) {
 	if cfg.FleetServerURL == "" {
 		return nil, nil
 	}
@@ -138,11 +152,11 @@ func startOpampReporter(cfg *Config, logger *zap.Logger, endpoint, buildVersion 
 	}
 
 	reporter := &opampReporter{client: c, cancel: cancel}
-	go reporter.reportLoop(startCtx, logger, snapshotFn)
+	go reporter.reportLoop(startCtx, logger, reportFn)
 	return reporter, nil
 }
 
-func (r *opampReporter) reportLoop(ctx context.Context, logger *zap.Logger, snapshotFn func() (MetricsSnapshot, error)) {
+func (r *opampReporter) reportLoop(ctx context.Context, logger *zap.Logger, reportFn func() (fleetReport, error)) {
 	ticker := time.NewTicker(reportInterval)
 	defer ticker.Stop()
 	for {
@@ -150,13 +164,13 @@ func (r *opampReporter) reportLoop(ctx context.Context, logger *zap.Logger, snap
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			r.reportOnce(logger, snapshotFn)
+			r.reportOnce(logger, reportFn)
 		}
 	}
 }
 
-func (r *opampReporter) reportOnce(logger *zap.Logger, snapshotFn func() (MetricsSnapshot, error)) {
-	snapshot, err := snapshotFn()
+func (r *opampReporter) reportOnce(logger *zap.Logger, reportFn func() (fleetReport, error)) {
+	snapshot, err := reportFn()
 	if err != nil {
 		if healthErr := r.client.SetHealth(&protobufs.ComponentHealth{Healthy: false, LastError: err.Error()}); healthErr != nil {
 			logger.Warn("setting unhealthy status", zap.Error(healthErr))

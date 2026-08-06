@@ -63,7 +63,7 @@ func (e *statusCfgExtension) Start(_ context.Context, _ component.Host) error {
 		}
 	}()
 
-	opamp, err := startOpampReporter(e.cfg, e.logger, e.cfg.Endpoint, e.buildVersion, e.buildSnapshot)
+	opamp, err := startOpampReporter(e.cfg, e.logger, e.cfg.Endpoint, e.buildVersion, e.buildFleetReport)
 	if err != nil {
 		return fmt.Errorf("statuscfg: starting fleet reporter: %w", err)
 	}
@@ -138,6 +138,21 @@ func (e *statusCfgExtension) buildSnapshot() (MetricsSnapshot, error) {
 		Pipelines:     pipelines,
 		Exporters:     exporters,
 	}, nil
+}
+
+// buildFleetReport is what actually goes out over OpAMP -- the same
+// snapshot buildSnapshot already computes for the local /status endpoint,
+// plus the structural topology graph the local /topology endpoint already
+// serves (buildTopology, topology.go). Combining them here rather than
+// sending two separate OpAMP messages keeps the fleet server's per-agent
+// state a single self-contained blob (store.go's snapshot_json column
+// already stores it as an opaque blob, so this needed no schema change).
+func (e *statusCfgExtension) buildFleetReport() (fleetReport, error) {
+	snapshot, err := e.buildSnapshot()
+	if err != nil {
+		return fleetReport{}, err
+	}
+	return fleetReport{MetricsSnapshot: snapshot, Topology: e.resolved.buildTopology()}, nil
 }
 
 // computePipelineSnapshots derives each pipeline's events_out/events_dropped
