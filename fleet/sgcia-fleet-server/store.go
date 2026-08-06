@@ -42,6 +42,12 @@ type Agent struct {
 	LastKnownGoodConfig string `json:"-"`
 	LastKnownGoodHash   string `json:"last_known_good_hash,omitempty"`
 	LastConfigError     string `json:"last_config_error,omitempty"`
+
+	// Tags (Phase 3) are operator-assigned, free-text labels (e.g.
+	// "role:collector", "env:prod") used to filter GET /agents and to
+	// scope bulk config pushes. Stored as a delimited string in SQLite,
+	// split/joined at this boundary -- see tagsColumn/parseTags.
+	Tags []string `json:"tags"`
 }
 
 type store struct {
@@ -76,6 +82,7 @@ var migrations = []string{
 	`ALTER TABLE agents ADD COLUMN last_known_good_config TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE agents ADD COLUMN last_known_good_hash TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE agents ADD COLUMN last_config_error TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE agents ADD COLUMN tags TEXT NOT NULL DEFAULT ''`,
 }
 
 func openStore(path string) (*store, error) {
@@ -150,7 +157,7 @@ ON CONFLICT(id) DO UPDATE SET
 }
 
 const agentColumns = `id, hostname, service_version, local_ui_addr, last_seen, healthy, last_error, snapshot_json,
-	pending_config, pending_config_hash, last_known_good_config, last_known_good_hash, last_config_error`
+	pending_config, pending_config_hash, last_known_good_config, last_known_good_hash, last_config_error, tags`
 
 func (s *store) listAgents(ctx context.Context) ([]Agent, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+agentColumns+` FROM agents ORDER BY hostname, id`)
@@ -181,14 +188,15 @@ func scanAgents(rows *sql.Rows) ([]Agent, error) {
 	var out []Agent
 	for rows.Next() {
 		var a Agent
-		var lastSeen string
+		var lastSeen, tagsCSV string
 		var healthyInt int
 		if err := rows.Scan(&a.ID, &a.Hostname, &a.ServiceVersion, &a.LocalUIAddr, &lastSeen, &healthyInt, &a.LastError, &a.SnapshotJSON,
-			&a.PendingConfig, &a.PendingConfigHash, &a.LastKnownGoodConfig, &a.LastKnownGoodHash, &a.LastConfigError); err != nil {
+			&a.PendingConfig, &a.PendingConfigHash, &a.LastKnownGoodConfig, &a.LastKnownGoodHash, &a.LastConfigError, &tagsCSV); err != nil {
 			return nil, err
 		}
 		a.LastSeen, _ = time.Parse(time.RFC3339, lastSeen)
 		a.Healthy = healthyInt != 0
+		a.Tags = parseTags(tagsCSV)
 		if a.SnapshotJSON != "" {
 			var snap any
 			if err := json.Unmarshal([]byte(a.SnapshotJSON), &snap); err == nil {
@@ -198,6 +206,35 @@ func scanAgents(rows *sql.Rows) ([]Agent, error) {
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+// parseTags splits the stored comma-delimited tag string back into a
+// slice, dropping empty entries -- so an agent with no tags at all gets
+// []string{}, not []string{""}.
+func parseTags(csv string) []string {
+	if csv == "" {
+		return []string{}
+	}
+	parts := strings.Split(csv, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// setTags full-replaces id's tag set (kubectl label --overwrite semantics,
+// not incremental add/remove -- one write, no read-modify-write race).
+// Callers are expected to have already normalized tags (lowercase,
+// trimmed, deduped, no embedded commas).
+func (s *store) setTags(ctx context.Context, id string, tags []string) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO agents (id, last_seen, tags) VALUES (?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET tags = excluded.tags
+`, id, time.Now().UTC().Format(time.RFC3339), strings.Join(tags, ","))
+	return err
 }
 
 // setPendingConfig records a config push as outstanding for id, creating

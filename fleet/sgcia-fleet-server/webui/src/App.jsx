@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { fetchJSON } from "./api.js";
+import { Fragment, useState } from "react";
+import { fetchJSON, sendJSON } from "./api.js";
 import { useInterval } from "./useInterval.js";
 
 const POLL_MS = 5000;
@@ -38,13 +38,108 @@ function SummaryItem({ label, value }) {
   );
 }
 
+// TagsCell shows an agent's tags as small pills; clicking switches to a
+// plain comma-separated text input (matching this UI's existing preference
+// for plain text over dialogs, e.g. DrilldownHint above), saving via
+// PUT /agents/{id}/tags on Enter or blur -- full-replace, not incremental.
+function TagsCell({ agent, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(agent.tags.join(", "));
+  const [error, setError] = useState("");
+
+  function save() {
+    const tags = value
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+    sendJSON("PUT", `agents/${agent.id}/tags`, { tags })
+      .then((res) => {
+        setError("");
+        setEditing(false);
+        onSaved(agent.id, res.tags);
+      })
+      .catch((err) => setError(err.message));
+  }
+
+  if (editing) {
+    return (
+      <span>
+        <input
+          className="tag-input"
+          autoFocus
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onBlur={save}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") save();
+            if (e.key === "Escape") setEditing(false);
+          }}
+        />
+        {error && <div className="tag-error">{error}</div>}
+      </span>
+    );
+  }
+
+  return (
+    <span className="tags-cell" onClick={() => setEditing(true)} title="Click to edit">
+      {agent.tags.length === 0 ? (
+        <span className="tag-empty">no tags</span>
+      ) : (
+        agent.tags.map((t) => (
+          <span className="tag-pill" key={t}>
+            {t}
+          </span>
+        ))
+      )}
+    </span>
+  );
+}
+
+// PushConfigPanel is a per-agent expandable row -- a plain textarea +
+// button, not a modal, matching this UI's existing style. Reused as-is
+// for the bulk-by-tag form below (same shape, different endpoint).
+function PushConfigPanel({ placeholder, onPush }) {
+  const [text, setText] = useState("");
+  const [status, setStatus] = useState(null);
+
+  function push() {
+    setStatus({ pending: true });
+    onPush(text)
+      .then((res) => setStatus({ pending: false, result: res }))
+      .catch((err) => setStatus({ pending: false, error: err.message }));
+  }
+
+  return (
+    <div className="push-panel">
+      <textarea
+        className="push-textarea"
+        placeholder={placeholder}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={8}
+      />
+      <button type="button" onClick={push} disabled={!text.trim() || status?.pending}>
+        {status?.pending ? "Pushing..." : "Push"}
+      </button>
+      {status?.error && <div className="push-error">{status.error}</div>}
+      {status?.result && (
+        <pre className="push-result">{JSON.stringify(status.result, null, 2)}</pre>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [agents, setAgents] = useState([]);
   const [connected, setConnected] = useState(true);
   const [connError, setConnError] = useState("");
+  const [tagFilter, setTagFilter] = useState("");
+  const [pushTargetId, setPushTargetId] = useState(null);
+  const [bulkTag, setBulkTag] = useState("");
 
   useInterval(() => {
-    fetchJSON("agents")
+    const path = "agents" + (tagFilter ? `?tag=${encodeURIComponent(tagFilter)}` : "");
+    fetchJSON(path)
       .then((list) => {
         setConnected(true);
         setAgents(list);
@@ -54,6 +149,10 @@ export default function App() {
         setConnError(err.message);
       });
   }, POLL_MS);
+
+  function applyTagsLocally(id, tags) {
+    setAgents((prev) => prev.map((a) => (a.id === id ? { ...a, tags } : a)));
+  }
 
   const healthyCount = agents.filter((a) => a.healthy).length;
   const unhealthyCount = agents.length - healthyCount;
@@ -78,8 +177,18 @@ export default function App() {
 
         <div className="panel">
           <h2>Agents</h2>
+          <input
+            className="tag-filter-input"
+            placeholder="Filter by tag (e.g. env:prod)"
+            value={tagFilter}
+            onChange={(e) => setTagFilter(e.target.value)}
+          />
           {agents.length === 0 ? (
-            <div className="empty-state">No agents enrolled yet. Point an sgcia-otelcol instance's fleet config at this server to see it here.</div>
+            <div className="empty-state">
+              {tagFilter
+                ? "No agents carry that tag."
+                : "No agents enrolled yet. Point an sgcia-otelcol instance's fleet config at this server to see it here."}
+            </div>
           ) : (
             <table className="data-table">
               <thead>
@@ -88,31 +197,73 @@ export default function App() {
                   <th>Version</th>
                   <th>Health</th>
                   <th>Last seen</th>
+                  <th>Tags</th>
                   <th>Drill down</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
                 {agents.map((a) => (
-                  <tr key={a.id} className={!a.healthy ? "row-problem" : undefined}>
-                    <td>{a.hostname || a.id}</td>
-                    <td>{a.service_version || "-"}</td>
-                    <td>
-                      <span className={"health-dot " + (a.healthy ? "healthy" : "unhealthy")} />
-                      {a.healthy ? "healthy" : "unhealthy"}
-                      {!a.healthy && a.last_error && (
-                        <span className="err-indicator" title={a.last_error}>
-                          !
-                        </span>
-                      )}
-                    </td>
-                    <td>{formatAgo(a.last_seen)}</td>
-                    <td>
-                      <DrilldownHint agent={a} />
-                    </td>
-                  </tr>
+                  <Fragment key={a.id}>
+                    <tr className={!a.healthy ? "row-problem" : undefined}>
+                      <td>{a.hostname || a.id}</td>
+                      <td>{a.service_version || "-"}</td>
+                      <td>
+                        <span className={"health-dot " + (a.healthy ? "healthy" : "unhealthy")} />
+                        {a.healthy ? "healthy" : "unhealthy"}
+                        {!a.healthy && a.last_error && (
+                          <span className="err-indicator" title={a.last_error}>
+                            !
+                          </span>
+                        )}
+                      </td>
+                      <td>{formatAgo(a.last_seen)}</td>
+                      <td>
+                        <TagsCell agent={a} onSaved={applyTagsLocally} />
+                      </td>
+                      <td>
+                        <DrilldownHint agent={a} />
+                      </td>
+                      <td>
+                        <button type="button" onClick={() => setPushTargetId(pushTargetId === a.id ? null : a.id)}>
+                          {pushTargetId === a.id ? "Cancel" : "Push config"}
+                        </button>
+                      </td>
+                    </tr>
+                    {pushTargetId === a.id && (
+                      <tr>
+                        <td colSpan={7}>
+                          <PushConfigPanel
+                            placeholder={`Full config.yaml to push to ${a.hostname || a.id}...`}
+                            onPush={(text) => sendJSON("POST", `agents/${a.id}/config`, { config_yaml: text })}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>
+          )}
+        </div>
+
+        <div className="panel">
+          <h2>Bulk push by tag</h2>
+          <input
+            className="tag-filter-input"
+            placeholder="Tag to target (e.g. env:staging)"
+            value={bulkTag}
+            onChange={(e) => setBulkTag(e.target.value)}
+          />
+          {bulkTag.trim() && (
+            <PushConfigPanel
+              placeholder={`Full config.yaml to push to every agent tagged "${bulkTag.trim()}"...`}
+              onPush={(text) =>
+                sendJSON("POST", `agents/bulk/config?tag=${encodeURIComponent(bulkTag.trim())}`, {
+                  config_yaml: text,
+                })
+              }
+            />
           )}
         </div>
       </main>
