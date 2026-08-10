@@ -7,6 +7,10 @@
 # Consumers (e.g. StrongIsland's docker-compose.yml) bind-mount their own
 # collector config at /etc/sgcia/config.yaml at runtime -- this image ships
 # only the binaries, no config baked in.
+#
+# The final stage runs as a non-root, fixed-UID (10001) user -- anything
+# bind-mounted in (config.yaml, or a file_storage extension's checkpoint
+# directory) needs to be readable/writable by that UID, not just root.
 
 FROM fedora:latest AS builder
 
@@ -44,8 +48,26 @@ RUN cargo build --release && cp target/release/sgcia /out/sgcia
 FROM fedora:latest
 WORKDIR /app
 
+# Non-root, fixed-UID system user -- mirrors the systemd deployment's own
+# sgcia:sgcia convention (packaging/systemd/sgcia.service, install.sh). A
+# fixed UID/GID (rather than an auto-assigned one) keeps bind-mounted host
+# directories' ownership predictable across rebuilds.
+RUN groupadd --system --gid 10001 sgcia \
+    && useradd --system --uid 10001 --gid sgcia --home-dir /var/lib/sgcia --shell /usr/sbin/nologin sgcia
+
 COPY --from=builder /out/sgcia-otelcol /usr/local/bin/sgcia-otelcol
 COPY --from=builder /out/sgcia /usr/local/bin/sgcia
+
+# Docker analogue of the systemd unit's AmbientCapabilities=CAP_NET_BIND_SERVICE
+# (see packaging/systemd/sgcia.service) -- grants just enough to bind the
+# privileged syslog ports below without running as root. Applied here, in the
+# final stage after the COPY above, not in the builder stage before it: a
+# capability set on a file isn't reliably preserved across a multi-stage
+# COPY, so setting it post-copy sidesteps that risk entirely.
+RUN dnf install -y libcap && dnf clean all \
+    && setcap 'cap_net_bind_service=+ep' /usr/local/bin/sgcia-otelcol
+
+USER sgcia
 
 # 514/udp + 601/tcp: the default syslog receiver ports (see the example
 # configs under otelcol/config/). 7801 (statuscfg's /status + web UI, also
