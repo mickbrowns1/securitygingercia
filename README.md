@@ -1175,3 +1175,31 @@ test that runs the real `sgcia-otelcol validate` (skipped automatically,
 not failed, if that binary hasn't been built yet at the conventional
 `otelcol/dist/sgcia-otelcol` path or via `SGCIA_OTELCOL_BIN`) -- build the
 Go side first if you want that coverage included.
+
+### Security scanning
+
+[`.github/workflows/security.yml`](.github/workflows/security.yml) runs
+four independent checks on every push/PR against `main`, weekly, and on
+demand -- each blocks CI on any finding:
+
+- **TruffleHog** -- verified secrets anywhere in the git history.
+- **OSV-Scanner** -- known vulnerabilities in every pinned dependency
+  (`Cargo.lock`, every `go.mod`, both webui `package-lock.json` files)
+  against the [OSV.dev](https://osv.dev) database, including the Go
+  toolchain itself.
+- **Semgrep** -- OWASP-style static analysis (`p/security-audit`,
+  `p/secrets`, `p/owasp-top-ten`, `p/golang`).
+- **Trivy** -- vulnerability scanning of the actual built `Dockerfile`
+  image's Go/Rust binary dependencies. Note: the base image is Fedora,
+  which Trivy's OS-package scanner doesn't support, so this only covers
+  binary-level dependencies, not OS packages -- a narrower complement to
+  OSV-Scanner, not a substitute for it.
+
+Run any of them locally the same way CI does, e.g.:
+
+```bash
+trufflehog git file://$(pwd) --only-verified --fail
+osv-scanner scan source --recursive .
+semgrep scan --config p/security-audit --config p/secrets --config p/owasp-top-ten --config p/golang --error
+docker build -t sgcia:ci . && trivy image --scanners vuln --exit-code 1 sgcia:ci
+```

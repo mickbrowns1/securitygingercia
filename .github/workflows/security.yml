@@ -1,0 +1,83 @@
+name: Security scan
+
+# Four independent, complementary checks -- each catches a different
+# class of problem this project could otherwise ship with no warning:
+#   - TruffleHog: verified secrets committed to the repo (any language).
+#   - OSV-Scanner: known vulnerabilities in pinned dependencies (Cargo.lock,
+#     every go.mod, both webui package-lock.json files) against the OSV.dev
+#     database -- including the Go toolchain itself, not just third-party
+#     packages.
+#   - Semgrep: static analysis for OWASP-style bug patterns, secrets-shaped
+#     code (not just committed secrets), and Go-specific issues.
+#   - Trivy: vulnerability scanning of the actual built container image --
+#     the base image here is Fedora, which Trivy's OS-package scanner
+#     doesn't support (confirmed: it warns "Unsupported os" and skips OS
+#     packages entirely), so this only ever covers the Go/Rust binaries'
+#     own dependencies -- a narrower, non-redundant complement to
+#     OSV-Scanner's source-manifest scan, not a substitute for real
+#     OS-layer scanning. Revisit if the base image ever changes to
+#     something Trivy actually supports (Debian/Ubuntu/Alpine/RHEL family).
+# Runs on every push/PR against main, weekly on a schedule (so a newly
+# disclosed CVE against an already-pinned, unchanged dependency still gets
+# caught), and on demand.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}
+
+jobs:
+  trufflehog:
+    name: Secrets (TruffleHog)
+    runs-on: ubuntu-latest
+    container:
+      image: trufflesecurity/trufflehog:latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Scan full git history for verified secrets
+        run: trufflehog git file://$(pwd) --only-verified --fail
+
+  osv-scanner:
+    name: Dependency vulnerabilities (OSV-Scanner)
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/google/osv-scanner:latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Scan every lockfile/manifest in the repo
+        run: osv-scanner scan source --recursive .
+
+  semgrep:
+    name: Static analysis (Semgrep)
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Scan with security/secrets/OWASP/Go rulesets
+        run: |
+          semgrep scan \
+            --config p/security-audit \
+            --config p/secrets \
+            --config p/owasp-top-ten \
+            --config p/golang \
+            --error
+
+  trivy:
+    name: Container image (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Build image
+        run: docker build -t sgcia:ci .
+      - name: Scan image dependencies
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: sgcia:ci
+          scanners: vuln
+          exit-code: "1"
