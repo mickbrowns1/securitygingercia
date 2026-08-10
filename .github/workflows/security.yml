@@ -50,7 +50,13 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Scan every lockfile/manifest in the repo
-        run: osv-scanner scan source --recursive .
+        # The osv-scanner binary lives at /osv-scanner in this image, not on
+        # $PATH -- confirmed by inspecting the image directly (its own
+        # ENTRYPOINT is ["/osv-scanner"], which a `container:` job's `run:`
+        # steps don't use, since GitHub Actions always execs steps via a
+        # shell inside the container rather than through the image's own
+        # entrypoint/cmd).
+        run: /osv-scanner scan source --recursive .
 
   semgrep:
     name: Static analysis (Semgrep)
