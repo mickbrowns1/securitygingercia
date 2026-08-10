@@ -1,6 +1,6 @@
 module github.com/mickbrowns1/securitygingercia/otelcol/exporters/logbufferexporter
 
-go 1.25.0
+go 1.25.12
 
 require (
 	go.opentelemetry.io/collector/component v1.63.0
