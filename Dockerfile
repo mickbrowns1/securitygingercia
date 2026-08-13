@@ -20,6 +20,15 @@ FROM fedora:latest AS builder
 # installed), and Fedora ships a recent-enough rust/cargo directly.
 RUN dnf install -y golang git gcc make rust cargo nodejs npm && dnf clean all
 
+# Pin npm to a known-good version rather than trusting whatever
+# fedora:latest's nodejs/npm package happens to resolve to today -- npm has
+# a longstanding, timing-sensitive "Exit handler never called!" bug
+# (npm/cli#4028) that comes and goes across releases and is more
+# reproducible under emulation/resource-constrained containers. Unpinned,
+# a `dnf` update rolling fedora:latest forward to a regressed npm build
+# could break this Dockerfile with no change to this repo's own code.
+RUN npm install -g npm@10.9.8
+
 WORKDIR /src
 COPY . .
 
