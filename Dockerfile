@@ -46,7 +46,15 @@ RUN cd otelcol/extensions/statuscfgextension/webui-react && npm ci && npm run bu
 # it, a fresh go.mod's toolchain directive can trigger Go's automatic
 # toolchain download, which fails on some arch/network combinations (see
 # README.md's Troubleshooting section, "toolchain not available").
-RUN go install go.opentelemetry.io/collector/cmd/builder@latest
+#
+# The builder tool itself is pinned to the SAME release line as the
+# component versions in builder-config.yaml (v0.157.0), not @latest --
+# @latest previously broke this build silently: OCB v0.161.0 bumped its own
+# core go.opentelemetry.io/collector/{otelcol,service} dependency to
+# require go >= 1.26, which the GOTOOLCHAIN pin below (go1.25.12) then
+# rejected. Pinning both to the same v0.157.0 line keeps them in lockstep --
+# bump both together, deliberately, when you bump builder-config.yaml.
+RUN go install go.opentelemetry.io/collector/cmd/builder@v0.157.0
 RUN mkdir -p /out && cd otelcol \
     && GOTOOLCHAIN=go1.25.12 "$(go env GOPATH)/bin/builder" --config builder-config.yaml \
     && cp dist/sgcia-otelcol /out/sgcia-otelcol
