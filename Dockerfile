@@ -47,16 +47,18 @@ RUN cd otelcol/extensions/statuscfgextension/webui-react && npm ci && npm run bu
 # toolchain download, which fails on some arch/network combinations (see
 # README.md's Troubleshooting section, "toolchain not available").
 #
-# The builder tool itself is pinned to the SAME release line as the
-# component versions in builder-config.yaml (v0.157.0), not @latest --
-# @latest previously broke this build silently: OCB v0.161.0 bumped its own
-# core go.opentelemetry.io/collector/{otelcol,service} dependency to
-# require go >= 1.26, which the GOTOOLCHAIN pin below (go1.25.12) then
-# rejected. Pinning both to the same v0.157.0 line keeps them in lockstep --
-# bump both together, deliberately, when you bump builder-config.yaml.
-RUN go install go.opentelemetry.io/collector/cmd/builder@v0.157.0
+# The builder tool itself is pinned to the SAME release line as every
+# component version in builder-config.yaml (v0.161.0), not @latest --
+# @latest previously broke this build silently: an OCB release bumped its
+# own core go.opentelemetry.io/collector/{otelcol,service} dependency to
+# require go >= 1.26 while builder-config.yaml's components (and the
+# GOTOOLCHAIN pin below) were still on the older v0.157.0/go1.25 line,
+# which OCB then rejected outright. v0.161.0/go1.26.0 is the current
+# matched pair -- bump both together, deliberately, when you next bump
+# builder-config.yaml, rather than letting either drift on its own.
+RUN go install go.opentelemetry.io/collector/cmd/builder@v0.161.0
 RUN mkdir -p /out && cd otelcol \
-    && GOTOOLCHAIN=go1.25.12 "$(go env GOPATH)/bin/builder" --config builder-config.yaml \
+    && GOTOOLCHAIN=go1.26.0 "$(go env GOPATH)/bin/builder" --config builder-config.yaml \
     && cp dist/sgcia-otelcol /out/sgcia-otelcol
 
 # The Rust companion (dashboard/edit TUI) -- workspace build, release profile.
